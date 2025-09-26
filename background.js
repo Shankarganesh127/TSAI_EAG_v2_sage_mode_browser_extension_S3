@@ -59,10 +59,54 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
+async function classifyTopic(topic) {
+  try {
+    const classifyPrompt = `Analyze this topic: "${topic}"
+1. What is the main category or field (e.g., Technology, Science, History, etc.)?
+2. What are the key aspects or subtopics?
+3. Give me 5 closely related topics.
+Respond in this exact format:
+CATEGORY: [main category]
+ASPECTS: [key aspects separated by commas]
+RELATED: [related topics separated by commas]`;
+
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          parts: [{ text: classifyPrompt }]
+        }]
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to classify topic');
+    }
+
+    const data = await response.json();
+    return data.candidates[0].content.parts[0].text.trim();
+  } catch (error) {
+    console.error('Error classifying topic:', error);
+    return null;
+  }
+}
+
 async function analyzeContent(content, topic) {
   try {
-    // First, get the main topic of the content
-    const topicPrompt = `Analyze this webpage content and tell me its main topic or subject matter in 2-3 words: "${content.substring(0, 1000)}..."`;
+    // First, get the main topic and context of the content
+    const topicPrompt = `Analyze this webpage content and provide:
+1. The main topic or subject matter
+2. Key themes or concepts discussed
+3. The field or category it belongs to (e.g., Technology, Science, Education)
+4. The level of content (beginner, intermediate, advanced)
+Respond in this exact format:
+TOPIC: [main topic]
+THEMES: [key themes]
+FIELD: [category]
+LEVEL: [level]
+
+Content: "${content.substring(0, 1500)}..."`;
     
     const topicResponse = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
       method: 'POST',
@@ -81,10 +125,26 @@ async function analyzeContent(content, topic) {
     const topicData = await topicResponse.json();
     const contentTopic = topicData.candidates[0].content.parts[0].text.trim();
 
-    // Now compare the topics
-    const comparePrompt = `Compare these two topics and tell me if they are directly related. Reply with ONLY "yes" or "no":
-    Topic 1: "${topic}"
-    Topic 2: "${contentTopic}"`;
+    // Get classification for selected topic
+    const topicClassification = await classifyTopic(topic);
+    
+    // Compare the topics with context
+    const comparePrompt = `I have a user selected topic and a webpage's content. Analyze if they are related:
+
+Selected Topic Information:
+${topicClassification}
+
+Webpage Content Analysis:
+${contentTopic}
+
+Are these directly related or discussing the same subject matter? Consider:
+1. The main categories and fields
+2. Key themes and concepts
+3. Related subtopics
+4. The depth and focus of the content
+
+Reply with ONLY "yes" or "no" followed by a confidence score (0-100):
+Format: [yes/no]|[score]`;
     
     const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
       method: 'POST',
@@ -101,16 +161,23 @@ async function analyzeContent(content, topic) {
     }
 
     const data = await response.json();
-    const answer = data.candidates[0].content.parts[0].text.trim().toLowerCase();
+    const response_text = data.candidates[0].content.parts[0].text.trim().toLowerCase();
+    const [answer, confidenceStr] = response_text.split('|');
+    const confidence = parseInt(confidenceStr, 10) || 0;
+    
     return {
       contentTopic,
-      isRelevant: answer === 'yes'
+      isRelevant: answer === 'yes',
+      confidence: confidence,
+      topicDetails: contentTopic // This contains the structured content analysis
     };
   } catch (error) {
     console.error('Error analyzing content:', error);
     return {
       contentTopic: 'Error analyzing content',
-      isRelevant: false
+      isRelevant: false,
+      confidence: 0,
+      topicDetails: null
     };
   }
 }
@@ -129,11 +196,26 @@ function isValidYoutubeUrl(url) {
 
 async function getYoutubeVideoSuggestion(topic) {
   try {
+    // Get topic classification first
+    const topicClassification = await classifyTopic(topic);
+    
     // Get previously suggested videos from storage
     const storageData = await chrome.storage.local.get('suggestedVideoUrls');
     const previousVideos = storageData.suggestedVideoUrls || [];
     
-    const prompt = `Suggest a single educational YouTube video URL about "${topic}" that is NOT in this list: ${JSON.stringify(previousVideos)}. Only return the URL, nothing else.`;
+    const prompt = `I need a YouTube video suggestion based on this topic analysis:
+${topicClassification}
+
+Requirements:
+1. Must be an educational or informative video
+2. Should match the topic's category and key aspects
+3. Must NOT be any of these previously suggested videos: ${JSON.stringify(previousVideos)}
+4. Must be a full YouTube video URL (not a shortened URL)
+5. Should be from a reputable channel if possible
+
+First, search the internet for some highly recommended videos about this topic.
+Then, suggest the BEST single video URL that meets these criteria.
+Reply with ONLY the full YouTube video URL and nothing else.`;
 
     const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
       method: 'POST',
@@ -206,12 +288,18 @@ async function checkActiveTabContent() {
       },
     });
 
-    const analysis = await analyzeContent(content, topic);
+    const [contentAnalysis, topicClassification] = await Promise.all([
+      analyzeContent(content, topic),
+      classifyTopic(topic)
+    ]);
+
     const currentState = {
       currentContent: content.substring(0, 100) + "...",
-      contentTopic: analysis.contentTopic,
+      contentAnalysis: contentAnalysis.contentTopic,
       selectedTopic: topic,
-      isRelevant: analysis.isRelevant,
+      topicClassification: topicClassification,
+      isRelevant: contentAnalysis.isRelevant,
+      confidence: contentAnalysis.confidence || 0,
       timestamp: new Date().toISOString(),
       tabId: tab.id
     };
