@@ -56,7 +56,7 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     }, 5000); // 5 second timeout
 
-    chrome.runtime.sendMessage({ action: 'checkConnection' }, (response) => {
+    chrome.runtime.sendMessage({ action: 'checkGeminiConnection' }, (response) => {
       clearTimeout(connectionTimeout);
       if (chrome.runtime.lastError) {
         console.error('Runtime error:', chrome.runtime.lastError);

@@ -1,31 +1,24 @@
+import { GoogleGenerativeAI } from './lib/gemini.js';
+
 const GEMINI_API_KEY = 'AIzaSyBe4P7dmOiBy6gE9Yys4kk0CHf8r04EC0Q';
-const GEMINI_MODEL = 'gemini-2.0-flash';  // Without 'models/' prefix
 let modelConfigured = false;
 let suggestedVideos = new Set(); // Store suggested video URLs
-let contentCheckInterval;
+let lastRequestTime = 0; // Track the last API request time
 
 // Initialize Gemini API connection
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'checkGeminiConnection') {
     console.log('🔄 Checking Gemini API connection...');
     
-    fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}?key=${GEMINI_API_KEY}`, {
-      method: 'GET',
-      headers: { 'Content-Type': 'application/json' }
-    })
-      .then(async response => {
-        if (!response.ok) {
-          throw new Error('API connection failed');
-        }
-        const result = await response.json();
-        if (result && result.model) {
-          modelConfigured = true;
-          console.log('Connected to model:', result.model.displayName);
-        }
+    // Use the Gemini SDK to test connection
+    GoogleGenerativeAI.generateContent(GEMINI_API_KEY, 'test')
+      .then(async () => {
+        modelConfigured = true;
+        console.log('✅ Connected to Gemini API');
         sendResponse({ success: true });
       })
       .catch(error => {
-        console.error('API connection failed:', error);
+        console.error('❌ API connection failed:', error);
         sendResponse({ success: false, error: error.message });
       });
     return true;  // Will respond asynchronously
@@ -43,34 +36,33 @@ Consider:
 3. Should be suitable for learning about the topic
 4. Prefer recent, high-quality content
 
-Format your response exactly like this:
+Format your response EXACTLY like this, including the labels:
 VIDEO_TITLE: [title]
-VIDEO_URL: [full YouTube URL]
-REASON: [why this video is relevant]`;
+VIDEO_URL: [full YouTube URL starting with https://]
+REASON: [why this video is relevant]
 
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{
-          parts: [{ text: prompt }]
-        }]
-      })
-    });
+IMPORTANT: The URL must be a complete, valid YouTube URL starting with https://`;
 
-    if (!response.ok) {
-      throw new Error('Failed to get video suggestion');
-    }
-
-    const data = await response.json();
-    const result = data.candidates[0].content.parts[0].text;
+    console.log('🎥 Requesting video with prompt:', prompt);
+    const response = await GoogleGenerativeAI.generateContent(GEMINI_API_KEY, prompt);
+    console.log('Raw video suggestion response:', response);
     
-    const urlMatch = result.match(/VIDEO_URL:\s*(https:\/\/(?:www\.)?youtube\.com\/[^\s]+)/i);
+    const urlMatch = response.match(/VIDEO_URL:\s*(https:\/\/(?:www\.)?youtube\.com\/(?:watch\?v=|embed\/|v\/|shorts\/)?[a-zA-Z0-9_-]+(?:\S+)?)/i);
+    
     if (!urlMatch) {
+      console.error('No valid YouTube URL found in response:', response);
       throw new Error('No valid YouTube URL found in response');
     }
 
-    return urlMatch[1];
+    // Clean up the URL to ensure it's in the correct format
+    let videoUrl = urlMatch[1].trim();
+    if (!videoUrl.includes('watch?v=')) {
+      const videoId = videoUrl.split('/').pop().split('?')[0];
+      videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    }
+
+    console.log('📺 Extracted video URL:', videoUrl);
+    return videoUrl;
   } catch (error) {
     console.error('❌ Error getting video suggestion:', error);
     return null;
@@ -96,28 +88,16 @@ MATCH: [yes/no]
 CONFIDENCE: [0-100]
 REASON: [brief explanation]`;
     
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{
-          parts: [{ text: comparePrompt }]
-        }]
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error('Failed to compare topics');
-    }
-
-    const data = await response.json();
-    const result = data.candidates[0].content.parts[0].text;
+    console.log('Comparing topics with prompt:', comparePrompt);
+    const result = await GoogleGenerativeAI.generateContent(GEMINI_API_KEY, comparePrompt);
+    console.log('Raw comparison result:', result);
     
     const matchMatch = result.match(/MATCH:\s*(yes|no)/i);
     const confidenceMatch = result.match(/CONFIDENCE:\s*(\d+)/i);
     const reasonMatch = result.match(/REASON:\s*([^\n]+)/i);
 
     if (!matchMatch || !confidenceMatch) {
+      console.error('Invalid format in result:', result);
       throw new Error('Invalid comparison result format');
     }
 
@@ -137,12 +117,22 @@ async function checkActiveTabContent() {
   try {
     console.log('🔄 Starting Active Tab Content Check');
     
+    // Implement rate limiting
+    const now = Date.now();
+    if (now - lastRequestTime < 1000) {
+      console.log('⏳ Rate limiting: Waiting for 1-second cooldown...');
+      return;
+    }
+    
     const { enabled, topic, isMonitoring } = await chrome.storage.sync.get(['enabled', 'topic', 'isMonitoring']);
     if (!enabled || !topic || !isMonitoring) {
       console.log('⏸️ Extension state:', { enabled, topic, isMonitoring });
       await chrome.action.setBadgeText({ text: '' });
       return;
     }
+    
+    // Update last request time
+    lastRequestTime = now;
 
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab) {
@@ -241,12 +231,7 @@ ${bodyText}
       console.log('📝 Retrieved page content:', pageText.slice(0, 100) + '...');
 
       // Extract page topic from Gemini response
-      const topicData = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{
-            parts: [{ text: `Based on this webpage content, determine:
+      const topicPrompt = `Based on this webpage content, determine:
 1. The main topic category
 2. The specific subject matter
 3. The target audience and content level
@@ -257,17 +242,9 @@ TOPIC: [Specific subject matter]
 AUDIENCE: [Target audience and level]
 
 Content to analyze:
-${pageText.substring(0, 1500)}...` }]
-          }]
-        })
-      });
+${pageText.substring(0, 1500)}...`;
 
-      if (!topicData.ok) {
-        throw new Error('Failed to get page topic');
-      }
-
-      const topicResult = await topicData.json();
-      const topicAnalysis = topicResult.candidates[0].content.parts[0].text;
+      const topicAnalysis = await GoogleGenerativeAI.generateContent(GEMINI_API_KEY, topicPrompt);
       
       // Extract category and topic
       const categoryMatch = topicAnalysis.match(/CATEGORY:\s*([^\n]+)/);
@@ -350,25 +327,15 @@ ${pageText.substring(0, 1500)}...` }]
   }
 }
 
-// Set up continuous tab monitoring
+// Set up tab-based monitoring
 function startMonitoring() {
-  // Clear any existing interval
-  if (contentCheckInterval) {
-    clearInterval(contentCheckInterval);
-  }
-  
-  // Check immediately
+  // Only check on tab changes now, no interval needed
   checkActiveTabContent();
-  
-  // Set up periodic checking
-  contentCheckInterval = setInterval(checkActiveTabContent, 5000); // Check every 5 seconds
 }
 
 function stopMonitoring() {
-  if (contentCheckInterval) {
-    clearInterval(contentCheckInterval);
-    contentCheckInterval = null;
-  }
+  // No need to clear anything since we're not using intervals
+  console.log('Monitoring stopped');
 }
 
 // Initialize when the extension loads
@@ -414,22 +381,39 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     const { enabled, topic } = await chrome.storage.sync.get(['enabled', 'topic']);
     
     if (enabled && topic && nextVideoUrl) {
-      // Get the current tab ID before opening the new one
-      const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      
-      // Open the video in a new tab
-      await chrome.tabs.create({ url: nextVideoUrl });
-      
-      // Close the previous tab
-      if (currentTab) {
+      try {
+        console.log('🔄 Processing alarm for video suggestion...');
+        
+        // Get the current tab
+        const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!currentTab) {
+          throw new Error('No active tab found');
+        }
+        
+        console.log('📑 Current tab:', currentTab.id, currentTab.url);
+        
+        // Create new tab with video
+        console.log('🎥 Opening video URL:', nextVideoUrl);
+        const newTab = await chrome.tabs.create({ url: nextVideoUrl });
+        console.log('✅ New tab created:', newTab.id);
+        
+        // Short delay to ensure new tab is properly opened
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        // Close the previous tab
+        console.log('🔚 Closing previous tab:', currentTab.id);
         await chrome.tabs.remove(currentTab.id);
+        
+        // Clear stored data
+        await chrome.storage.local.remove('nextVideoUrl');
+        await chrome.storage.sync.remove('timerEndTime');
+        console.log('🧹 Cleared stored video URL and timer');
+        
+      } catch (error) {
+        console.error('❌ Error in alarm handler:', error);
       }
-      
-      // Clear the stored video URL
-      await chrome.storage.local.remove('nextVideoUrl');
-      
-      // Reset timer end time
-      await chrome.storage.sync.remove('timerEndTime');
+    } else {
+      console.log('⚠️ Alarm triggered but conditions not met:', { enabled, topic, hasUrl: !!nextVideoUrl });
     }
   }
 });
