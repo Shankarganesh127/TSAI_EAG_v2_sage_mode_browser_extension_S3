@@ -315,13 +315,27 @@ async function prepareNextVideo(topic) {
 
 async function checkActiveTabContent() {
   try {
+    console.log('🔄 Starting Active Tab Content Check');
+    
     const { enabled, topic } = await chrome.storage.sync.get(['enabled', 'topic']);
-    if (!enabled || !topic) return;
+    if (!enabled || !topic) {
+      console.log('⏸️ Extension disabled or no topic set:', { enabled, topic });
+      return;
+    }
 
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab) return;
+    if (!tab) {
+      console.log('⚠️ No active tab found');
+      return;
+    }
+    
+    console.log('📄 Analyzing Tab:', {
+      title: tab.title,
+      url: tab.url
+    });
 
     // Inject content script to get page content
+    console.log('📑 Extracting page content...');
     const [{ result: content }] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: () => {
@@ -332,14 +346,28 @@ async function checkActiveTabContent() {
           if (['SCRIPT', 'STYLE', 'NOSCRIPT'].includes(node.tagName)) return '';
           return Array.from(node.childNodes).map(extractText).join(' ');
         };
-        return extractText(document.body).replace(/\\s+/g, ' ').trim();
+        const text = extractText(document.body).replace(/\\s+/g, ' ').trim();
+        console.log('📝 Extracted Content Length:', text.length);
+        return text;
       },
+    });
+    
+    console.log('📊 Content Stats:', {
+      length: content.length,
+      preview: content.substring(0, 100) + '...'
     });
 
     const [contentAnalysis, topicClassification] = await Promise.all([
       analyzeContent(content, topic),
       classifyTopic(topic)
     ]);
+
+    console.log('📊 Analysis Results:', {
+      contentAnalysis,
+      topicClassification,
+      isRelevant: contentAnalysis.isRelevant,
+      confidence: contentAnalysis.confidence
+    });
 
     const currentState = {
       currentContent: content.substring(0, 100) + "...",
@@ -351,19 +379,26 @@ async function checkActiveTabContent() {
       timestamp: new Date().toISOString(),
       tabId: tab.id
     };
+    
+    console.log('💾 Saving Current State:', currentState);
 
     await chrome.storage.local.set({ currentState });
 
-    if (isRelevant) {
+    if (contentAnalysis.isRelevant) {
+      console.log('✅ Content is relevant to topic, stopping timer');
       // Stop the timer if content is relevant
       chrome.alarms.clear('youtubeSuggestion');
       await chrome.storage.sync.set({ timerEndTime: null });
     } else {
+      console.log('⚠️ Content is not relevant, checking video status');
       // Check if we have a next video ready
       const { nextVideoUrl } = await chrome.storage.local.get('nextVideoUrl');
       if (!nextVideoUrl) {
+        console.log('🎥 No video ready, preparing next video suggestion');
         // Prepare next video if we don't have one
         await prepareNextVideo(topic);
+      } else {
+        console.log('✓ Next video is already prepared:', nextVideoUrl);
       }
 
       // Restart timer if not already running
