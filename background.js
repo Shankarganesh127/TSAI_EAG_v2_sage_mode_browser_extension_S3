@@ -213,6 +213,74 @@ Format: [yes/no]|[score]`;
   }
 }
 
+async function checkYouTubeVideoAvailability(url) {
+  try {
+    const urlObj = new URL(url);
+    const videoId = urlObj.searchParams.get('v');
+    if (!videoId) {
+      console.log('❌ No video ID found in URL');
+      return false;
+    }
+
+    // Use YouTube's oEmbed endpoint to check if video exists and is available
+    const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`;
+    
+    console.log('🔍 Checking video availability:', { videoId, url });
+    const response = await fetch(oembedUrl);
+    
+    if (!response.ok) {
+      console.log('❌ Video not available:', { 
+        status: response.status,
+        statusText: response.statusText 
+      });
+      return false;
+    }
+
+    const data = await response.json();
+    console.log('✅ Video available:', { 
+      title: data.title,
+      author: data.author_name,
+      thumbnailUrl: data.thumbnail_url 
+    });
+    return true;
+  } catch (error) {
+    console.error('❌ Error checking video availability:', error);
+    return false;
+  }
+}
+
+function sanitizeYouTubeUrl(url) {
+  try {
+    // Parse and validate the URL
+    const urlObj = new URL(url);
+    
+    // Ensure it's a YouTube domain
+    if (!(urlObj.hostname === 'www.youtube.com' || urlObj.hostname === 'youtube.com')) {
+      throw new Error('Not a YouTube URL');
+    }
+    
+    // Ensure proper protocol
+    urlObj.protocol = 'https:';
+    
+    // Ensure www subdomain
+    if (urlObj.hostname === 'youtube.com') {
+      urlObj.hostname = 'www.youtube.com';
+    }
+    
+    // Keep only essential parameters
+    const newParams = new URLSearchParams();
+    if (urlObj.searchParams.has('v')) {
+      newParams.set('v', urlObj.searchParams.get('v'));
+    }
+    urlObj.search = newParams.toString();
+    
+    return urlObj.toString();
+  } catch (error) {
+    console.error('❌ Error sanitizing YouTube URL:', error);
+    return null;
+  }
+}
+
 function isYouTubeUrl(url) {
   try {
     const urlObj = new URL(url);
@@ -226,12 +294,13 @@ async function isValidYoutubeUrl(url) {
   try {
     console.log('🔍 Validating YouTube URL:', url);
     
-    if (!isYouTubeUrl(url)) {
-      console.log('❌ Not a YouTube URL');
+    const sanitizedUrl = sanitizeYouTubeUrl(url);
+    if (!sanitizedUrl) {
+      console.log('❌ Could not sanitize YouTube URL');
       return false;
     }
 
-    const urlObj = new URL(url);
+    const urlObj = new URL(sanitizedUrl);
     if (!urlObj.pathname.includes('/watch')) {
       console.log('❌ Not a YouTube video watch URL');
       return false;
@@ -242,7 +311,14 @@ async function isValidYoutubeUrl(url) {
       return false;
     }
 
-    console.log('✅ Valid YouTube URL format:', url);
+    // Check if video is available
+    const isAvailable = await checkYouTubeVideoAvailability(sanitizedUrl);
+    if (!isAvailable) {
+      console.log('❌ Video is not available');
+      return false;
+    }
+
+    console.log('✅ Valid and available YouTube URL:', sanitizedUrl);
     return true;
   } catch (error) {
     console.error('❌ Error validating YouTube URL:', error);
@@ -285,146 +361,152 @@ async function getYoutubeVideoSuggestion(topic) {
       previousCount: previousVideos.length
     });
 
-    const prompt = `Search for and suggest an educational YouTube video about this topic:
-${topicClassification}
+    async function getVideoUrlFromGemini(isRetry = false, customPrompt = null) {
+      const prompt = customPrompt || `Find 1 recent educational YouTube video about ${topic}.
 
-Requirements:
-1. Must be from one of these channels ONLY: ${popularChannels}
-2. Must be uploaded in 2024-2025 to ensure relevance
-3. Must be a full-length video (not a Short)
-4. Must cover current trends and developments
-5. Should be suitable for a professional/technical audience
-6. Must NOT be any of these previously suggested videos: ${JSON.stringify(previousVideos)}
+Important Instructions:
+1. The video must be from one of these channels: ${popularChannels}
+2. Must be a recent video (within last 2 years)
+3. Must be a full video (not a Short)
+4. Cannot be any of these videos: ${JSON.stringify(previousVideos)}
 
-Video Content Requirements:
-1. Should include expert insights and analysis
-2. Should cover practical applications and real-world examples
-3. Should discuss latest developments and future implications
-4. Should be comprehensive but concise (10-30 minutes ideal)
+You MUST respond with ONLY a YouTube video URL and nothing else.
+Example of correct response:
+https://www.youtube.com/watch?v=abcd12345
 
-Instructions:
-1. Search specifically for "[topic] trends 2025" or "latest [topic] developments"
-2. Prioritize videos with:
-   - High view counts (>10k views)
-   - Positive ratings (>90% likes)
-   - Engagement in comments
-3. Verify video exists and is publicly available
-4. Return ONLY the YouTube URL in format: https://www.youtube.com/watch?v=VIDEOID
+RULES:
+- Return ONLY the URL
+- The URL must start with https://www.youtube.com/watch?v=
+- NO other text, NO explanations
+- NO line breaks before or after the URL
+- NO comments about date/time constraints`;
 
-Return nothing but the raw URL - no text, explanation, or formatting.`;
-
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        contents: [{
-          parts: [{
-            text: prompt
-          }]
-        }]
-      })
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json();
-      console.error('❌ Gemini API Error (Video Suggestion):', errorData);
-      throw new Error('Failed to get video suggestion');
-    }
-
-    const data = await response.json();
-    console.log('📥 Gemini Response (Video Suggestion):', {
-      rawResponse: data,
-      extractedUrl: data.candidates[0].content.parts[0].text.trim()
-    });
-    
-    const responseText = data.candidates[0].content.parts[0].text.trim();
-    console.log('📝 Raw response:', responseText);
-    
-    // Extract complete YouTube URL
-    const urlMatch = responseText.match(/https?:\/\/(www\.)?youtube\.com\/watch\?[^\s"<>]+/);
-    if (!urlMatch) {
-      console.error('❌ Invalid response format:', {
-        responseLength: responseText.length,
-        responsePreview: responseText.substring(0, 100)
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }]
+        })
       });
-      throw new Error('No valid YouTube URL found in response');
-    }
-    
-    let videoUrl = urlMatch[0];
-    console.log('🔍 Extracted video URL:', {
-      url: videoUrl,
-      responseLength: responseText.length
-    });
-    
-    // Validate the YouTube URL
-    let maxRetries = 3;
-    let currentTry = 1;
-    
-    while (currentTry <= maxRetries) {
-      console.log(`📍 Attempt ${currentTry}/${maxRetries}`);
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        console.error('❌ Gemini API Error:', errorData);
+        throw new Error('Failed to get video suggestion');
+      }
+
+      const data = await response.json();
       
-      if (await isValidYoutubeUrl(videoUrl)) {
-        // Check if this video was already suggested
-        if (previousVideos.includes(videoUrl)) {
-          console.log('⚠️ Video was previously suggested:', {
-            url: videoUrl,
-            suggestedCount: previousVideos.length,
-            attemptNumber: currentTry
-          });
+      console.log('📥 Raw Gemini response:', {
+        status: response.status,
+        ok: response.ok,
+        data: JSON.stringify(data)
+      });
+      
+      if (!data.candidates?.[0]?.content?.parts?.[0]?.text) {
+        console.error('❌ Invalid response structure:', data);
+        throw new Error('Invalid response structure from Gemini API');
+      }
+      
+      const responseText = data.candidates[0].content.parts[0].text.trim();
+      console.log('📝 Raw response text:', responseText);
+      
+      // Extract URL by looking for https://www.youtube.com/watch?v=
+      const youtubeUrl = responseText.split('\n').find(line => 
+        line.trim().startsWith('https://www.youtube.com/watch?v=')
+      );
+      
+      if (!youtubeUrl) {
+        console.error('❌ No YouTube URL found in response. Response was:', responseText);
+        throw new Error('No valid YouTube URL found in response');
+      }
+      
+      const cleanedUrl = youtubeUrl.trim();
+      console.log('🔍 Found YouTube URL:', cleanedUrl);
+
+      // cleanedUrl is already validated at this point
+      const foundUrl = cleanedUrl;
+
+      // Make sure it's a valid watch URL
+      try {
+        const urlObj = new URL(foundUrl);
+        const videoId = urlObj.searchParams.get('v') || urlObj.pathname.split('/').pop();
+        
+        if (!videoId) {
+          console.error('❌ No video ID found in URL:', foundUrl);
+          throw new Error('Invalid YouTube URL format');
+        }
+
+        // Convert to standard format
+        const standardUrl = `https://www.youtube.com/watch?v=${videoId}`;
+        console.log('✅ Standardized YouTube URL:', standardUrl);
+        return standardUrl;
+        
+      } catch (error) {
+        console.error('❌ Error processing URL:', {
+          url: foundUrl,
+          error: error.message,
+          response: cleanedResponse
+        });
+        throw new Error('Failed to process YouTube URL');
+      }
+    }
+
+    let maxRetries = 5;
+    let currentTry = 1;
+    let videoUrl = null;
+
+    while (currentTry <= maxRetries) {
+      try {
+        console.log(`📍 Attempt ${currentTry}/${maxRetries}`);
+
+        // Get a video suggestion
+        if (!videoUrl) {
+          videoUrl = await getVideoUrlFromGemini();
+        }
+
+        // Validate the video
+        if (!videoUrl || !(await isValidYoutubeUrl(videoUrl))) {
+          console.log('⚠️ Invalid or unavailable video, trying again');
+          videoUrl = null;
           currentTry++;
           continue;
         }
-        
-        console.log('🎬 Video validation successful:', {
-          url: videoUrl,
-          isNew: !previousVideos.includes(videoUrl),
-          attemptNumber: currentTry
-        });
-        
-        // Update storage with new video URL
+
+        // Check if already suggested
+        if (previousVideos.includes(videoUrl)) {
+          console.log('⚠️ Video was previously suggested, trying again');
+          const retryPrompt = `Find 1 recent educational YouTube video about "${topic}".
+
+Important Instructions:
+1. Must be from one of these channels: ${popularChannels}
+2. Must be a recent video (within last 2 years)
+3. Must be a full video (not a Short)
+4. Cannot be any of these videos: ${JSON.stringify(previousVideos)}
+
+Return ONLY the YouTube URL. No other text or explanations.`;
+          videoUrl = await getVideoUrlFromGemini(true, retryPrompt);
+          currentTry++;
+          continue;
+        }
+
+        // Video is valid and new
+        console.log('✅ Valid video found:', videoUrl);
         previousVideos.push(videoUrl);
         await chrome.storage.local.set({ suggestedVideoUrls: previousVideos });
-        console.log('✅ New video saved:', {
-          url: videoUrl,
-          totalSuggested: previousVideos.length,
-          timestamp: new Date().toISOString()
-        });
         return videoUrl;
+
+      } catch (error) {
+        console.error(`❌ Error in attempt ${currentTry}:`, error);
+        videoUrl = null;
+        currentTry++;
       }
-      
-      if (currentTry < maxRetries) {
-        console.log(`⚠️ Retry ${currentTry}/${maxRetries}: Getting new video suggestion`);
-        const retryPrompt = `Give me a different educational YouTube video URL about "${topic}" from one of these channels: ${popularChannels}. The video must be from the last 2 years and be a full video (not a Short). Only return the video URL, nothing else.`;
-        
-        const retryResponse = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{
-              parts: [{ text: retryPrompt }]
-            }]
-          })
-        });
-        
-        const retryData = await retryResponse.json();
-        const retryText = retryData.candidates[0].content.parts[0].text.trim();
-        const retryMatch = retryText.match(/https?:\/\/(www\.)?youtube\.com\/watch\?v=[a-zA-Z0-9_-]+/);
-        
-        if (retryMatch) {
-          videoUrl = retryMatch[0];
-          console.log('🔄 Got new video URL:', videoUrl);
-        }
-      }
-      
-      currentTry++;
     }
-    
-    console.error('❌ Failed to get valid YouTube video after 3 attempts');
-    throw new Error('Could not get valid YouTube video suggestion');
+
+    throw new Error(`Failed to find valid video after ${maxRetries} attempts`);
+
   } catch (error) {
-    console.error('Error getting video suggestion:', error);
+    console.error('❌ Error getting video suggestion:', error);
     throw error;
   }
 }
@@ -683,14 +765,25 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       }
 
       if (nextVideoUrl) {
-        // Open the prepared video URL in a new tab
-        await chrome.tabs.create({ url: nextVideoUrl });
+        console.log('🎥 Opening prepared video URL:', nextVideoUrl);
+        // Ensure the URL is properly encoded
+        const encodedUrl = encodeURI(nextVideoUrl);
+        // Open the prepared video URL in a new tab with focus
+        await chrome.tabs.create({ 
+          url: encodedUrl,
+          active: true // Make the new tab active
+        });
         await chrome.storage.sync.set({ lastVideoUrl: nextVideoUrl });
         await chrome.storage.local.remove('nextVideoUrl');
       } else if (topic) {
         // If we don't have a prepared video, get one and open it
+        console.log('🔄 Getting new video suggestion for topic:', topic);
         const videoUrl = await getYoutubeVideoSuggestion(topic);
-        await chrome.tabs.create({ url: videoUrl });
+        const encodedUrl = encodeURI(videoUrl);
+        await chrome.tabs.create({ 
+          url: encodedUrl,
+          active: true // Make the new tab active
+        });
         await chrome.storage.sync.set({ lastVideoUrl: videoUrl });
       }
 
