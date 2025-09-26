@@ -296,22 +296,39 @@ async function getYoutubeVideoSuggestion(topic) {
       'Udacity'
     ].join(', ');
     
-    const prompt = `Search for and suggest a YouTube video about this topic:
+    console.log('🎯 Generating video suggestion with criteria:', {
+      topic,
+      classification: topicClassification,
+      previousCount: previousVideos.length
+    });
+
+    const prompt = `Search for and suggest an educational YouTube video about this topic:
 ${topicClassification}
 
-Requirements for the video:
-1. Must be from a popular tech or educational channel (e.g., TED, Google AI, MIT, Stanford)
-2. Must be a recent video (within last 2 years) to ensure relevance
-3. Must be a full-length video (not a short)
-4. Must NOT be any of these previously suggested videos: ${JSON.stringify(previousVideos)}
+Requirements:
+1. Must be from one of these channels ONLY: ${popularChannels}
+2. Must be uploaded in 2024-2025 to ensure relevance
+3. Must be a full-length video (not a Short)
+4. Must cover current trends and developments
+5. Should be suitable for a professional/technical audience
+6. Must NOT be any of these previously suggested videos: ${JSON.stringify(previousVideos)}
+
+Video Content Requirements:
+1. Should include expert insights and analysis
+2. Should cover practical applications and real-world examples
+3. Should discuss latest developments and future implications
+4. Should be comprehensive but concise (10-30 minutes ideal)
 
 Instructions:
-1. Search for "latest [topic] tutorial" or "[topic] explained" on YouTube
-2. Look for videos with high view counts and positive ratings
-3. Verify the video exists and is publicly available
-4. Return ONLY a single, valid, full YouTube video URL in this format: https://www.youtube.com/watch?v=VIDEOID
+1. Search specifically for "[topic] trends 2025" or "latest [topic] developments"
+2. Prioritize videos with:
+   - High view counts (>10k views)
+   - Positive ratings (>90% likes)
+   - Engagement in comments
+3. Verify video exists and is publicly available
+4. Return ONLY the YouTube URL in format: https://www.youtube.com/watch?v=VIDEOID
 
-Do not include any text, explanation, or formatting - just the raw YouTube URL.`;
+Return nothing but the raw URL - no text, explanation, or formatting.`;
 
     const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
       method: 'POST',
@@ -345,11 +362,20 @@ Do not include any text, explanation, or formatting - just the raw YouTube URL.`
     // Extract URL using regex
     const urlMatch = responseText.match(/https?:\/\/(www\.)?youtube\.com\/watch\?v=[a-zA-Z0-9_-]+/);
     if (!urlMatch) {
+      console.error('❌ Invalid response format:', {
+        responseLength: responseText.length,
+        responsePreview: responseText.substring(0, 100)
+      });
       throw new Error('No valid YouTube URL found in response');
     }
     
     let videoUrl = urlMatch[0];
-    console.log('🔍 Extracted video URL:', videoUrl);
+    const videoId = extractVideoId(videoUrl);
+    console.log('🔍 Extracted video details:', {
+      videoUrl,
+      videoId,
+      responseLength: responseText.length
+    });
     
     // Validate the YouTube URL
     let maxRetries = 3;
@@ -361,15 +387,31 @@ Do not include any text, explanation, or formatting - just the raw YouTube URL.`
       if (await isValidYoutubeUrl(videoUrl)) {
         // Check if this video was already suggested
         if (previousVideos.includes(videoUrl)) {
-          console.log('⚠️ Video was previously suggested, trying again');
+          console.log('⚠️ Video was previously suggested:', {
+            videoUrl,
+            suggestedCount: previousVideos.length,
+            attemptNumber: currentTry
+          });
           currentTry++;
           continue;
         }
         
+        // Get video ID for logging
+        const videoId = extractVideoId(videoUrl);
+        console.log('🎬 Video validation successful:', {
+          videoId,
+          isNew: !previousVideos.includes(videoUrl),
+          attemptNumber: currentTry
+        });
+        
         // Update storage with new video URL
         previousVideos.push(videoUrl);
         await chrome.storage.local.set({ suggestedVideoUrls: previousVideos });
-        console.log('✅ New video URL saved:', videoUrl);
+        console.log('✅ New video saved:', {
+          videoUrl,
+          totalSuggested: previousVideos.length,
+          timestamp: new Date().toISOString()
+        });
         return videoUrl;
       }
       
