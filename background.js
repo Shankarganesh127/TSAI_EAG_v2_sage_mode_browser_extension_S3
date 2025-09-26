@@ -213,28 +213,6 @@ Format: [yes/no]|[score]`;
   }
 }
 
-function extractVideoId(url) {
-  try {
-    const urlObj = new URL(url);
-    if (!(urlObj.hostname === 'www.youtube.com' || urlObj.hostname === 'youtube.com')) {
-      return null;
-    }
-    
-    if (urlObj.pathname === '/watch') {
-      return urlObj.searchParams.get('v');
-    }
-    
-    if (urlObj.pathname.startsWith('/v/')) {
-      return urlObj.pathname.split('/')[2];
-    }
-    
-    return null;
-  } catch (error) {
-    console.error('❌ Error parsing URL:', error);
-    return null;
-  }
-}
-
 function isYouTubeUrl(url) {
   try {
     const urlObj = new URL(url);
@@ -253,13 +231,18 @@ async function isValidYoutubeUrl(url) {
       return false;
     }
 
-    const videoId = extractVideoId(url);
-    if (!videoId) {
-      console.log('❌ Could not extract video ID');
+    const urlObj = new URL(url);
+    if (!urlObj.pathname.includes('/watch')) {
+      console.log('❌ Not a YouTube video watch URL');
       return false;
     }
 
-    console.log('✅ Valid YouTube URL format with video ID:', videoId);
+    if (!urlObj.searchParams.has('v')) {
+      console.log('❌ Missing video parameter');
+      return false;
+    }
+
+    console.log('✅ Valid YouTube URL format:', url);
     return true;
   } catch (error) {
     console.error('❌ Error validating YouTube URL:', error);
@@ -359,8 +342,8 @@ Return nothing but the raw URL - no text, explanation, or formatting.`;
     const responseText = data.candidates[0].content.parts[0].text.trim();
     console.log('📝 Raw response:', responseText);
     
-    // Extract URL using regex
-    const urlMatch = responseText.match(/https?:\/\/(www\.)?youtube\.com\/watch\?v=[a-zA-Z0-9_-]+/);
+    // Extract complete YouTube URL
+    const urlMatch = responseText.match(/https?:\/\/(www\.)?youtube\.com\/watch\?[^\s"<>]+/);
     if (!urlMatch) {
       console.error('❌ Invalid response format:', {
         responseLength: responseText.length,
@@ -370,10 +353,8 @@ Return nothing but the raw URL - no text, explanation, or formatting.`;
     }
     
     let videoUrl = urlMatch[0];
-    const videoId = extractVideoId(videoUrl);
-    console.log('🔍 Extracted video details:', {
-      videoUrl,
-      videoId,
+    console.log('🔍 Extracted video URL:', {
+      url: videoUrl,
       responseLength: responseText.length
     });
     
@@ -388,7 +369,7 @@ Return nothing but the raw URL - no text, explanation, or formatting.`;
         // Check if this video was already suggested
         if (previousVideos.includes(videoUrl)) {
           console.log('⚠️ Video was previously suggested:', {
-            videoUrl,
+            url: videoUrl,
             suggestedCount: previousVideos.length,
             attemptNumber: currentTry
           });
@@ -396,10 +377,8 @@ Return nothing but the raw URL - no text, explanation, or formatting.`;
           continue;
         }
         
-        // Get video ID for logging
-        const videoId = extractVideoId(videoUrl);
         console.log('🎬 Video validation successful:', {
-          videoId,
+          url: videoUrl,
           isNew: !previousVideos.includes(videoUrl),
           attemptNumber: currentTry
         });
@@ -408,7 +387,7 @@ Return nothing but the raw URL - no text, explanation, or formatting.`;
         previousVideos.push(videoUrl);
         await chrome.storage.local.set({ suggestedVideoUrls: previousVideos });
         console.log('✅ New video saved:', {
-          videoUrl,
+          url: videoUrl,
           totalSuggested: previousVideos.length,
           timestamp: new Date().toISOString()
         });
