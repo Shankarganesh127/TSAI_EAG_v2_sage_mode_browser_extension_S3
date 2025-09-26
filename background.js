@@ -4,49 +4,22 @@ let modelConfigured = false;
 let suggestedVideos = new Set(); // Store suggested video URLs
 let contentCheckInterval;
 
-function testConnection() {
-  return new Promise((resolve, reject) => {
-    if (modelConfigured) {
-      resolve({ success: true });
-      return;
-    }
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
-
-    // Test with a simple model check
+// Initialize Gemini API connection
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'checkGeminiConnection') {
+    console.log('🔄 Checking Gemini API connection...');
+    
     fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}?key=${GEMINI_API_KEY}`, {
-      signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json'
-      }
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' }
     })
-      .then(response => {
-        clearTimeout(timeoutId);
+      .then(async response => {
         if (!response.ok) {
-          return response.json().then(data => {
-            throw new Error(data.error?.message || 'API request failed');
-          });
+          throw new Error('API connection failed');
         }
-        modelConfigured = true;
-        return response.json();
-      })
-      .then(data => {
-        resolve({ success: true, model: data });
-      })
-      .catch(error => {
-        clearTimeout(timeoutId);
-        reject(error);
-      });
-  });
-}
-
-// Handle messages
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.action === 'checkConnection') {
-    testConnection()
-      .then(result => {
-        if (result.model) {
+        const result = await response.json();
+        if (result && result.model) {
+          modelConfigured = true;
           console.log('Connected to model:', result.model.displayName);
         }
         sendResponse({ success: true });
@@ -59,123 +32,69 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-async function classifyTopic(topic) {
+async function getYouTubeVideoSuggestion(topic) {
   try {
-    console.log('🔍 Topic Classification Request:', {
-      topic,
-      timestamp: new Date().toISOString()
-    });
+    console.log('🎥 Getting video suggestion for topic:', topic);
 
-    const classifyPrompt = `Analyze this topic: "${topic}"
-1. What is the main category or field (e.g., Technology, Science, History, etc.)?
-2. What are the key aspects or subtopics?
-3. Give me 5 closely related topics.
-Respond in this exact format:
-CATEGORY: [main category]
-ASPECTS: [key aspects separated by commas]
-RELATED: [related topics separated by commas]`;
+    const prompt = `Suggest an educational YouTube video about "${topic}".
+Consider:
+1. Video should be from a reputable source
+2. Content should be educational and informative
+3. Should be suitable for learning about the topic
+4. Prefer recent, high-quality content
 
-    console.log('📤 Gemini Prompt (Topic Classification):', classifyPrompt);
+Format your response exactly like this:
+VIDEO_TITLE: [title]
+VIDEO_URL: [full YouTube URL]
+REASON: [why this video is relevant]`;
 
     const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{
-          parts: [{ text: classifyPrompt }]
+          parts: [{ text: prompt }]
         }]
       })
     });
 
     if (!response.ok) {
-      const errorData = await response.json();
-      console.error('❌ Gemini API Error:', errorData);
-      throw new Error('Failed to classify topic');
+      throw new Error('Failed to get video suggestion');
     }
 
     const data = await response.json();
-    console.log('📥 Gemini Response (Topic Classification):', {
-      rawResponse: data,
-      extractedText: data.candidates[0].content.parts[0].text.trim()
-    });
-    return data.candidates[0].content.parts[0].text.trim();
+    const result = data.candidates[0].content.parts[0].text;
+    
+    const urlMatch = result.match(/VIDEO_URL:\s*(https:\/\/(?:www\.)?youtube\.com\/[^\s]+)/i);
+    if (!urlMatch) {
+      throw new Error('No valid YouTube URL found in response');
+    }
+
+    return urlMatch[1];
   } catch (error) {
-    console.error('❌ Topic Classification Error:', error);
+    console.error('❌ Error getting video suggestion:', error);
     return null;
   }
 }
 
-async function analyzeContent(content, topic) {
+async function compareTopics(pageCategory, pageTopic, selectedTopic) {
   try {
-    console.log('🔍 Content Analysis Request:', {
-      contentLength: content.length,
-      topic,
-      timestamp: new Date().toISOString()
-    });
+    const comparePrompt = `Compare these topics:
 
-    // First, get the main topic and context of the content
-    const topicPrompt = `Analyze this webpage content and provide:
-1. The main topic or subject matter
-2. Key themes or concepts discussed
-3. The field or category it belongs to (e.g., Technology, Science, Education)
-4. The level of content (beginner, intermediate, advanced)
-Respond in this exact format:
-TOPIC: [main topic]
-THEMES: [key themes]
-FIELD: [category]
-LEVEL: [level]
+Page Category: ${pageCategory}
+Page Topic: ${pageTopic}
+User's Selected Topic: ${selectedTopic}
 
-Content: "${content.substring(0, 1500)}..."`;
+Consider:
+1. Direct matches (same topic/category)
+2. Related topics within same category
+3. Subtopics or broader topics that encompass each other
+4. Semantic similarity and relevance
 
-    console.log('📤 Gemini Prompt (Content Analysis):', {
-      prompt: topicPrompt,
-      contentPreview: content.substring(0, 100) + '...'
-    });
-    
-    const topicResponse = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{
-          parts: [{ text: topicPrompt }]
-        }]
-      })
-    });
-
-    if (!topicResponse.ok) {
-      const errorData = await topicResponse.json();
-      console.error('❌ Gemini API Error (Content Analysis):', errorData);
-      throw new Error('Failed to get content topic');
-    }
-
-    const topicData = await topicResponse.json();
-    console.log('📥 Gemini Response (Content Analysis):', {
-      rawResponse: topicData,
-      extractedText: topicData.candidates[0].content.parts[0].text.trim()
-    });
-    const contentTopic = topicData.candidates[0].content.parts[0].text.trim();
-
-    console.log('🔄 Starting Topic Classification');
-    // Get classification for selected topic
-    const topicClassification = await classifyTopic(topic);
-    
-    // Compare the topics with context
-    const comparePrompt = `I have a user selected topic and a webpage's content. Analyze if they are related:
-
-Selected Topic Information:
-${topicClassification}
-
-Webpage Content Analysis:
-${contentTopic}
-
-Are these directly related or discussing the same subject matter? Consider:
-1. The main categories and fields
-2. Key themes and concepts
-3. Related subtopics
-4. The depth and focus of the content
-
-Reply with ONLY "yes" or "no" followed by a confidence score (0-100):
-Format: [yes/no]|[score]`;
+Response format:
+MATCH: [yes/no]
+CONFIDENCE: [0-100]
+REASON: [brief explanation]`;
     
     const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
       method: 'POST',
@@ -188,337 +107,29 @@ Format: [yes/no]|[score]`;
     });
 
     if (!response.ok) {
-      throw new Error('Failed to analyze content');
+      throw new Error('Failed to compare topics');
     }
 
     const data = await response.json();
-    const response_text = data.candidates[0].content.parts[0].text.trim().toLowerCase();
-    const [answer, confidenceStr] = response_text.split('|');
-    const confidence = parseInt(confidenceStr, 10) || 0;
+    const result = data.candidates[0].content.parts[0].text;
     
-    return {
-      contentTopic,
-      isRelevant: answer === 'yes',
-      confidence: confidence,
-      topicDetails: contentTopic // This contains the structured content analysis
-    };
+    const matchMatch = result.match(/MATCH:\s*(yes|no)/i);
+    const confidenceMatch = result.match(/CONFIDENCE:\s*(\d+)/i);
+    const reasonMatch = result.match(/REASON:\s*([^\n]+)/i);
+
+    if (!matchMatch || !confidenceMatch) {
+      throw new Error('Invalid comparison result format');
+    }
+
+    const isRelevant = matchMatch[1].toLowerCase() === 'yes';
+    const confidence = parseInt(confidenceMatch[1], 10) / 100;
+    const reason = reasonMatch ? reasonMatch[1].trim() : '';
+
+    console.log('🎯 Topic comparison result:', { isRelevant, confidence, reason });
+    return { isRelevant, confidence, reason };
   } catch (error) {
-    console.error('Error analyzing content:', error);
-    return {
-      contentTopic: 'Error analyzing content',
-      isRelevant: false,
-      confidence: 0,
-      topicDetails: null
-    };
-  }
-}
-
-async function checkYouTubeVideoAvailability(url) {
-  try {
-    const urlObj = new URL(url);
-    const videoId = urlObj.searchParams.get('v');
-    if (!videoId) {
-      console.log('❌ No video ID found in URL');
-      return false;
-    }
-
-    // Use YouTube's oEmbed endpoint to check if video exists and is available
-    const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`;
-    
-    console.log('🔍 Checking video availability:', { videoId, url });
-    const response = await fetch(oembedUrl);
-    
-    if (!response.ok) {
-      console.log('❌ Video not available:', { 
-        status: response.status,
-        statusText: response.statusText 
-      });
-      return false;
-    }
-
-    const data = await response.json();
-    console.log('✅ Video available:', { 
-      title: data.title,
-      author: data.author_name,
-      thumbnailUrl: data.thumbnail_url 
-    });
-    return true;
-  } catch (error) {
-    console.error('❌ Error checking video availability:', error);
-    return false;
-  }
-}
-
-function sanitizeYouTubeUrl(url) {
-  try {
-    // Parse and validate the URL
-    const urlObj = new URL(url);
-    
-    // Ensure it's a YouTube domain
-    if (!(urlObj.hostname === 'www.youtube.com' || urlObj.hostname === 'youtube.com')) {
-      throw new Error('Not a YouTube URL');
-    }
-    
-    // Ensure proper protocol
-    urlObj.protocol = 'https:';
-    
-    // Ensure www subdomain
-    if (urlObj.hostname === 'youtube.com') {
-      urlObj.hostname = 'www.youtube.com';
-    }
-    
-    // Keep only essential parameters
-    const newParams = new URLSearchParams();
-    if (urlObj.searchParams.has('v')) {
-      newParams.set('v', urlObj.searchParams.get('v'));
-    }
-    urlObj.search = newParams.toString();
-    
-    return urlObj.toString();
-  } catch (error) {
-    console.error('❌ Error sanitizing YouTube URL:', error);
-    return null;
-  }
-}
-
-function isYouTubeUrl(url) {
-  try {
-    const urlObj = new URL(url);
-    return urlObj.hostname === 'www.youtube.com' || urlObj.hostname === 'youtube.com';
-  } catch {
-    return false;
-  }
-}
-
-async function isValidYoutubeUrl(url) {
-  try {
-    console.log('🔍 Validating YouTube URL:', url);
-    
-    const sanitizedUrl = sanitizeYouTubeUrl(url);
-    if (!sanitizedUrl) {
-      console.log('❌ Could not sanitize YouTube URL');
-      return false;
-    }
-
-    const urlObj = new URL(sanitizedUrl);
-    if (!urlObj.pathname.includes('/watch')) {
-      console.log('❌ Not a YouTube video watch URL');
-      return false;
-    }
-
-    if (!urlObj.searchParams.has('v')) {
-      console.log('❌ Missing video parameter');
-      return false;
-    }
-
-    // Check if video is available
-    const isAvailable = await checkYouTubeVideoAvailability(sanitizedUrl);
-    if (!isAvailable) {
-      console.log('❌ Video is not available');
-      return false;
-    }
-
-    console.log('✅ Valid and available YouTube URL:', sanitizedUrl);
-    return true;
-  } catch (error) {
-    console.error('❌ Error validating YouTube URL:', error);
-    return false;
-  }
-}
-
-async function getYoutubeVideoSuggestion(topic) {
-  try {
-    console.log('🎥 Starting Video Suggestion Request:', {
-      topic,
-      timestamp: new Date().toISOString()
-    });
-
-    // Get topic classification first
-    const topicClassification = await classifyTopic(topic);
-    console.log('📋 Topic Classification for Video:', topicClassification);
-    
-    // Get previously suggested videos from storage
-    const storageData = await chrome.storage.local.get('suggestedVideoUrls');
-    const previousVideos = storageData.suggestedVideoUrls || [];
-    console.log('🎬 Previously Suggested Videos:', previousVideos);
-
-    // Prepare a list of popular educational channels
-    const popularChannels = [
-      'TED',
-      'TEDx Talks',
-      'MIT OpenCourseWare',
-      'Stanford',
-      'Google Developers',
-      'freeCodeCamp.org',
-      'Coursera',
-      'Khan Academy',
-      'Udacity'
-    ].join(', ');
-    
-    console.log('🎯 Generating video suggestion with criteria:', {
-      topic,
-      classification: topicClassification,
-      previousCount: previousVideos.length
-    });
-
-    async function getVideoUrlFromGemini(isRetry = false, customPrompt = null) {
-      const prompt = customPrompt || `Find 1 recent educational YouTube video about ${topic}.
-
-Important Instructions:
-1. The video must be from one of these channels: ${popularChannels}
-2. Must be a recent video (within last 2 years)
-3. Must be a full video (not a Short)
-4. Cannot be any of these videos: ${JSON.stringify(previousVideos)}
-
-You MUST respond with ONLY a YouTube video URL and nothing else.
-Example of correct response:
-https://www.youtube.com/watch?v=abcd12345
-
-RULES:
-- Return ONLY the URL
-- The URL must start with https://www.youtube.com/watch?v=
-- NO other text, NO explanations
-- NO line breaks before or after the URL
-- NO comments about date/time constraints`;
-
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }]
-        })
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        console.error('❌ Gemini API Error:', errorData);
-        throw new Error('Failed to get video suggestion');
-      }
-
-      const data = await response.json();
-      
-      console.log('📥 Raw Gemini response:', {
-        status: response.status,
-        ok: response.ok,
-        data: JSON.stringify(data)
-      });
-      
-      if (!data.candidates?.[0]?.content?.parts?.[0]?.text) {
-        console.error('❌ Invalid response structure:', data);
-        throw new Error('Invalid response structure from Gemini API');
-      }
-      
-      const responseText = data.candidates[0].content.parts[0].text.trim();
-      console.log('📝 Raw response text:', responseText);
-      
-      // Extract URL by looking for https://www.youtube.com/watch?v=
-      const youtubeUrl = responseText.split('\n').find(line => 
-        line.trim().startsWith('https://www.youtube.com/watch?v=')
-      );
-      
-      if (!youtubeUrl) {
-        console.error('❌ No YouTube URL found in response. Response was:', responseText);
-        throw new Error('No valid YouTube URL found in response');
-      }
-      
-      const cleanedUrl = youtubeUrl.trim();
-      console.log('🔍 Found YouTube URL:', cleanedUrl);
-
-      // cleanedUrl is already validated at this point
-      const foundUrl = cleanedUrl;
-
-      // Make sure it's a valid watch URL
-      try {
-        const urlObj = new URL(foundUrl);
-        const videoId = urlObj.searchParams.get('v') || urlObj.pathname.split('/').pop();
-        
-        if (!videoId) {
-          console.error('❌ No video ID found in URL:', foundUrl);
-          throw new Error('Invalid YouTube URL format');
-        }
-
-        // Convert to standard format
-        const standardUrl = `https://www.youtube.com/watch?v=${videoId}`;
-        console.log('✅ Standardized YouTube URL:', standardUrl);
-        return standardUrl;
-        
-      } catch (error) {
-        console.error('❌ Error processing URL:', {
-          url: foundUrl,
-          error: error.message,
-          response: cleanedResponse
-        });
-        throw new Error('Failed to process YouTube URL');
-      }
-    }
-
-    let maxRetries = 5;
-    let currentTry = 1;
-    let videoUrl = null;
-
-    while (currentTry <= maxRetries) {
-      try {
-        console.log(`📍 Attempt ${currentTry}/${maxRetries}`);
-
-        // Get a video suggestion
-        if (!videoUrl) {
-          videoUrl = await getVideoUrlFromGemini();
-        }
-
-        // Validate the video
-        if (!videoUrl || !(await isValidYoutubeUrl(videoUrl))) {
-          console.log('⚠️ Invalid or unavailable video, trying again');
-          videoUrl = null;
-          currentTry++;
-          continue;
-        }
-
-        // Check if already suggested
-        if (previousVideos.includes(videoUrl)) {
-          console.log('⚠️ Video was previously suggested, trying again');
-          const retryPrompt = `Find 1 recent educational YouTube video about "${topic}".
-
-Important Instructions:
-1. Must be from one of these channels: ${popularChannels}
-2. Must be a recent video (within last 2 years)
-3. Must be a full video (not a Short)
-4. Cannot be any of these videos: ${JSON.stringify(previousVideos)}
-
-Return ONLY the YouTube URL. No other text or explanations.`;
-          videoUrl = await getVideoUrlFromGemini(true, retryPrompt);
-          currentTry++;
-          continue;
-        }
-
-        // Video is valid and new
-        console.log('✅ Valid video found:', videoUrl);
-        previousVideos.push(videoUrl);
-        await chrome.storage.local.set({ suggestedVideoUrls: previousVideos });
-        return videoUrl;
-
-      } catch (error) {
-        console.error(`❌ Error in attempt ${currentTry}:`, error);
-        videoUrl = null;
-        currentTry++;
-      }
-    }
-
-    throw new Error(`Failed to find valid video after ${maxRetries} attempts`);
-
-  } catch (error) {
-    console.error('❌ Error getting video suggestion:', error);
-    throw error;
-  }
-}
-
-async function prepareNextVideo(topic) {
-  try {
-    const videoUrl = await getYoutubeVideoSuggestion(topic);
-    await chrome.storage.local.set({ nextVideoUrl: videoUrl });
-    return videoUrl;
-  } catch (error) {
-    console.error('Error preparing next video:', error);
-    return null;
+    console.error('❌ Topic comparison error:', error);
+    return { isRelevant: false, confidence: 0, reason: 'Error comparing topics' };
   }
 }
 
@@ -529,7 +140,6 @@ async function checkActiveTabContent() {
     const { enabled, topic, isMonitoring } = await chrome.storage.sync.get(['enabled', 'topic', 'isMonitoring']);
     if (!enabled || !topic || !isMonitoring) {
       console.log('⏸️ Extension state:', { enabled, topic, isMonitoring });
-      // Update extension icon to indicate monitoring state
       await chrome.action.setBadgeText({ text: '' });
       return;
     }
@@ -541,294 +151,285 @@ async function checkActiveTabContent() {
       await chrome.action.setBadgeBackgroundColor({ color: '#95a5a6' });
       return;
     }
-    
-    if (tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) {
-      console.log('⏭️ Skipping browser internal page');
+
+    // Handle restricted URLs
+    try {
+      const url = new URL(tab.url);
+      const restrictedProtocols = ['chrome:', 'chrome-extension:', 'edge:', 'about:', 'file:', 'chrome-search:'];
+      if (restrictedProtocols.some(protocol => url.protocol.startsWith(protocol))) {
+        console.log('⏭️ Skipping restricted page:', url.protocol);
+        await chrome.action.setBadgeText({ text: '-' });
+        await chrome.action.setBadgeBackgroundColor({ color: '#95a5a6' });
+        return;
+      }
+    } catch (error) {
+      console.log('⚠️ Invalid or restricted URL');
       await chrome.action.setBadgeText({ text: '-' });
       await chrome.action.setBadgeBackgroundColor({ color: '#95a5a6' });
       return;
     }
-    
-    console.log('📄 Analyzing Tab:', {
-      title: tab.title,
-      url: tab.url
-    });
 
-    // Get the page content
-    const content = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      function: () => {
-        const extractText = (node) => {
-          if (node.nodeType === Node.TEXT_NODE) return node.textContent;
-          if (node.nodeType !== Node.ELEMENT_NODE) return '';
-          if (['SCRIPT', 'STYLE', 'NOSCRIPT'].includes(node.tagName)) return '';
-          return Array.from(node.childNodes).map(extractText).join(' ');
-        };
-        return extractText(document.body).replace(/\\s+/g, ' ').trim();
-      }
-    });
+    // Extract page content
+    try {
+      const content = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        function: () => {
+          const getMetaContent = (name) => {
+            const meta = document.querySelector(`meta[name="${name}"], meta[property="${name}"]`);
+            return meta ? meta.getAttribute('content') : '';
+          };
 
-    if (!content || !content[0]?.result) {
-      console.log('⚠️ No content found on page');
-      return;
-    }
+          // Extract meaningful content
+          const extractText = (node) => {
+            if (!node) return '';
+            if (node.nodeType === Node.TEXT_NODE) return node.textContent;
+            if (node.nodeType !== Node.ELEMENT_NODE) return '';
+            if (['SCRIPT', 'STYLE', 'NOSCRIPT', 'IFRAME', 'NAV', 'FOOTER'].includes(node.tagName)) return '';
+            
+            // Special handling for headers
+            if (['H1', 'H2', 'H3'].includes(node.tagName)) {
+              return `[${node.tagName}] ${node.textContent.trim()} [/${node.tagName}]\n`;
+            }
+            
+            return Array.from(node.childNodes).map(extractText).join(' ');
+          };
 
-    const pageText = content[0].result;
-    if (!pageText.trim()) {
-      console.log('⚠️ Empty page content');
-      return;
-    }
+          // Get all headers first
+          const h1s = Array.from(document.querySelectorAll('h1')).map(h => `[H1] ${h.textContent.trim()} [/H1]`);
+          const h2s = Array.from(document.querySelectorAll('h2')).map(h => `[H2] ${h.textContent.trim()} [/H2]`);
+          const h3s = Array.from(document.querySelectorAll('h3')).map(h => `[H3] ${h.textContent.trim()} [/H3]`);
+          
+          // Get main content
+          const mainContent = document.querySelector('main') || document.querySelector('article') || document.body;
+          const bodyText = extractText(mainContent).replace(/\s+/g, ' ').trim();
+          
+          // Get metadata
+          const description = getMetaContent('description') || getMetaContent('og:description');
+          const keywords = getMetaContent('keywords');
+          const title = document.title;
 
-    console.log('📝 Retrieved page content:', pageText.slice(0, 100) + '...');
+          // Combine all content with clear section markers
+          return `
+PAGE TITLE: ${title}
 
-    // Analyze the content
-    const pageTopics = await analyzePageContent(pageText);
-    if (!pageTopics || pageTopics.length === 0) {
-      console.log('⚠️ No topics extracted from page');
-      return;
-    }
+HEADERS HIERARCHY:
+${h1s.join('\n')}
+${h2s.join('\n')}
+${h3s.join('\n')}
 
-    console.log('🏷️ Page topics:', pageTopics);
+META DESCRIPTION:
+${description}
 
-    // Compare with user's topic
-    const { isRelevant, confidence } = await compareTopics(topic, pageTopics);
-    console.log('🔍 Topic comparison:', { isRelevant, confidence });
+KEYWORDS:
+${keywords}
 
-    // Save current state for UI
-    const currentState = {
-      currentContent: pageText.substring(0, 100) + "...",
-      contentTopics: pageTopics,
-      selectedTopic: topic,
-      isRelevant: isRelevant,
-      confidence: confidence,
-      timestamp: new Date().toISOString(),
-      tabId: tab.id
-    };
-    
-    console.log('💾 Saving Current State:', currentState);
-    await chrome.storage.local.set({ currentState });
-
-    // Update extension icon based on content relevance
-    if (isRelevant && confidence >= 0.7) {
-      console.log('✅ Content is relevant to topic, stopping timer');
-      // Set green indicator
-      await chrome.action.setBadgeText({ text: '✓' });
-      await chrome.action.setBadgeBackgroundColor({ color: '#2ecc71' });
-      // Stop timer
-      chrome.alarms.clear('youtubeSuggestion');
-      await chrome.storage.sync.set({ timerEndTime: null });
-      // Broadcast state update
-      chrome.runtime.sendMessage({ 
-        action: 'contentStateUpdate', 
-        state: { isRelevant: true, confidence }
+MAIN CONTENT:
+${bodyText}
+`.trim();
+        }
       });
-    } else {
-      console.log('⚠️ Content not relevant enough, checking video status');
-      // Set red indicator
-      await chrome.action.setBadgeText({ text: '!' });
-      await chrome.action.setBadgeBackgroundColor({ color: '#e74c3c' });
-      // Check if we have a next video ready
-      const { nextVideoUrl } = await chrome.storage.local.get('nextVideoUrl');
-      if (!nextVideoUrl) {
-        console.log('🎥 No video ready, preparing next video suggestion');
-        await prepareNextVideo(topic);
+
+      if (!content || !content[0]?.result) {
+        throw new Error('No content found on page');
+      }
+
+      const pageText = content[0].result;
+      if (!pageText.trim()) {
+        throw new Error('Empty page content');
+      }
+
+      console.log('📝 Retrieved page content:', pageText.slice(0, 100) + '...');
+
+      // Extract page topic from Gemini response
+      const topicData = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{
+            parts: [{ text: `Based on this webpage content, determine:
+1. The main topic category
+2. The specific subject matter
+3. The target audience and content level
+
+Format your response exactly like this:
+CATEGORY: [Main category like Technology, Science, Business, etc.]
+TOPIC: [Specific subject matter]
+AUDIENCE: [Target audience and level]
+
+Content to analyze:
+${pageText.substring(0, 1500)}...` }]
+          }]
+        })
+      });
+
+      if (!topicData.ok) {
+        throw new Error('Failed to get page topic');
+      }
+
+      const topicResult = await topicData.json();
+      const topicAnalysis = topicResult.candidates[0].content.parts[0].text;
+      
+      // Extract category and topic
+      const categoryMatch = topicAnalysis.match(/CATEGORY:\s*([^\n]+)/);
+      const topicMatch = topicAnalysis.match(/TOPIC:\s*([^\n]+)/);
+      const audienceMatch = topicAnalysis.match(/AUDIENCE:\s*([^\n]+)/);
+
+      const pageCategory = categoryMatch ? categoryMatch[1].trim() : 'Unknown';
+      const pageTopic = topicMatch ? topicMatch[1].trim() : 'Unknown';
+      const pageAudience = audienceMatch ? audienceMatch[1].trim() : 'Unknown';
+
+      // Compare topics using the new comparison function
+      const { isRelevant, confidence, reason } = await compareTopics(pageCategory, pageTopic, topic);
+
+      // Save current state for UI
+      const currentState = {
+        currentContent: pageText.substring(0, 100) + "...",
+        contentTopic: `${pageCategory} - ${pageTopic}\n(${pageAudience})`,
+        selectedTopic: topic,
+        isRelevant,
+        confidence,
+        reason,
+        timestamp: new Date().toISOString(),
+        tabId: tab.id
+      };
+
+      console.log('💾 Saving Current State:', currentState);
+      await chrome.storage.local.set({ currentState });
+
+      if (isRelevant && confidence >= 0.7) {
+        console.log('✅ Content is relevant to topic');
+        await chrome.action.setBadgeText({ text: '✓' });
+        await chrome.action.setBadgeBackgroundColor({ color: '#2ecc71' });
+        
+        // Clear any existing timer and video suggestion
+        chrome.alarms.clear('youtubeSuggestion');
+        await chrome.storage.sync.set({ timerEndTime: null });
+        await chrome.storage.local.remove('nextVideoUrl');
       } else {
-        console.log('✓ Next video is already prepared:', nextVideoUrl);
+        console.log('⚠️ Content not relevant, preparing video suggestion');
+        await chrome.action.setBadgeText({ text: '!' });
+        await chrome.action.setBadgeBackgroundColor({ color: '#e74c3c' });
+
+        // Get a video suggestion if we don't have one
+        const { nextVideoUrl } = await chrome.storage.local.get('nextVideoUrl');
+        if (!nextVideoUrl) {
+          const videoUrl = await getYouTubeVideoSuggestion(topic);
+          if (videoUrl) {
+            await chrome.storage.local.set({ nextVideoUrl: videoUrl });
+          }
+        }
+
+        // Start/update timer if not already running
+        const { timerEndTime } = await chrome.storage.sync.get('timerEndTime');
+        if (!timerEndTime) {
+          const { timer = 5 } = await chrome.storage.sync.get('timer');
+          chrome.alarms.create('youtubeSuggestion', { delayInMinutes: timer });
+          await chrome.storage.sync.set({ timerEndTime: Date.now() + timer * 60 * 1000 });
+        }
       }
+
       // Broadcast state update
       chrome.runtime.sendMessage({ 
         action: 'contentStateUpdate', 
-        state: { isRelevant: false, confidence }
+        state: { 
+          isRelevant, 
+          confidence,
+          reason,
+          pageTitle: tab.title,
+          pageUrl: tab.url
+        }
       });
 
-      // Restart timer if not already running
-      const { timerEndTime } = await chrome.storage.sync.get('timerEndTime');
-      if (!timerEndTime) {
-        const { timer = 5 } = await chrome.storage.sync.get('timer');
-        chrome.alarms.create('youtubeSuggestion', { delayInMinutes: timer });
-        await chrome.storage.sync.set({ timerEndTime: Date.now() + timer * 60 * 1000 });
-      }
+    } catch (error) {
+      console.error('❌ Error processing page:', error);
+      await chrome.action.setBadgeText({ text: 'x' });
+      await chrome.action.setBadgeBackgroundColor({ color: '#e74c3c' });
     }
   } catch (error) {
     console.error('❌ Error checking active tab content:', error);
   }
 }
 
-// Handle messages
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.action === 'getVideoSuggestion') {
-    getYoutubeVideoSuggestion(message.topic)
-      .then(videoUrl => {
-        chrome.storage.sync.set({ lastVideoUrl: videoUrl }, () => {
-          sendResponse({ success: true, videoUrl });
-        });
-      })
-      .catch(error => {
-        sendResponse({ success: false, error: error.message });
-      });
-    return true;
-  }
-});
-
-// Function to analyze content topic using Gemini
-async function analyzePageContent(content) {
-  try {
-    console.log('🔍 Analyzing page content...');
-    const prompt = `Analyze this webpage content and identify its main topic. 
-    Content: "${content.substring(0, 1500)}..."
-    
-    Respond in this exact format:
-    TOPIC: [main topic in 2-3 words]
-    FIELD: [general field/category]
-    KEYWORDS: [5 most relevant keywords]`;
-
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{
-          parts: [{ text: prompt }]
-        }]
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error('Failed to analyze content');
-    }
-
-    const data = await response.json();
-    console.log('📝 Content Analysis:', data.candidates[0].content.parts[0].text);
-    return data.candidates[0].content.parts[0].text;
-  } catch (error) {
-    console.error('❌ Content analysis error:', error);
-    return null;
-  }
-}
-
-// Function to compare topics
-async function compareTopics(contentAnalysis, selectedTopic) {
-  try {
-    console.log('🔄 Comparing topics:', { contentAnalysis, selectedTopic });
-    const prompt = `Compare these two topics and determine if they are directly related:
-
-    Selected Topic: "${selectedTopic}"
-    Page Content Topic: "${contentAnalysis}"
-
-    Consider:
-    1. Direct topic match
-    2. Parent/child relationship
-    3. Related field/category
-    4. Shared keywords
-
-    Respond with only "yes" or "no" followed by a confidence score (0-100).
-    Format: answer|score`;
-
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{
-          parts: [{ text: prompt }]
-        }]
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error('Failed to compare topics');
-    }
-
-    const data = await response.json();
-    const result = data.candidates[0].content.parts[0].text.trim().toLowerCase();
-    const [match, score] = result.split('|');
-    
-    console.log('📊 Topic Comparison Result:', { match, score });
-    return {
-      isMatch: match === 'yes',
-      confidence: parseInt(score, 10) || 0
-    };
-  } catch (error) {
-    console.error('❌ Topic comparison error:', error);
-    return { isMatch: false, confidence: 0 };
-  }
-}
-
 // Set up continuous tab monitoring
-chrome.tabs.onActivated.addListener(async (activeInfo) => {
-  console.log('👁️ Tab activated:', activeInfo.tabId);
-  await checkActiveTabContent();
+function startMonitoring() {
+  // Clear any existing interval
+  if (contentCheckInterval) {
+    clearInterval(contentCheckInterval);
+  }
+  
+  // Check immediately
+  checkActiveTabContent();
+  
+  // Set up periodic checking
+  contentCheckInterval = setInterval(checkActiveTabContent, 5000); // Check every 5 seconds
+}
+
+function stopMonitoring() {
+  if (contentCheckInterval) {
+    clearInterval(contentCheckInterval);
+    contentCheckInterval = null;
+  }
+}
+
+// Initialize when the extension loads
+chrome.runtime.onInstalled.addListener(() => {
+  console.log('🚀 Extension installed/updated');
+  chrome.storage.sync.get(['enabled', 'topic', 'timer'], (result) => {
+    if (result.enabled === undefined) {
+      chrome.storage.sync.set({ enabled: false });
+    }
+    if (result.timer === undefined) {
+      chrome.storage.sync.set({ timer: 5 }); // Default 5 minutes
+    }
+  });
 });
 
-chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-  if (changeInfo.status === 'complete' && tab.active) {
-    console.log('📄 Active tab updated:', tabId);
-    await checkActiveTabContent();
+// Listen for changes in monitoring state
+chrome.storage.onChanged.addListener((changes) => {
+  if (changes.isMonitoring) {
+    if (changes.isMonitoring.newValue) {
+      startMonitoring();
+    } else {
+      stopMonitoring();
+    }
   }
 });
 
-// Set up content monitoring messages
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.action === 'startMonitoring') {
-    console.log('▶️ Starting content monitoring');
-    chrome.storage.sync.set({ isMonitoring: true });
-    checkActiveTabContent(); // Initial check
-    sendResponse({ success: true });
-  } else if (message.action === 'stopMonitoring') {
-    console.log('⏹️ Stopping content monitoring');
-    chrome.storage.sync.set({ isMonitoring: false });
-    sendResponse({ success: true });
-  } else if (message.action === 'checkContent') {
-    checkActiveTabContent()
-      .then(() => sendResponse({ success: true }))
-      .catch(error => sendResponse({ success: false, error: error.message }));
-    return true;
+// Listen for tab updates
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'complete') {
+    checkActiveTabContent();
   }
-  return true;
 });
 
-// Handle alarms
+// Listen for tab activation
+chrome.tabs.onActivated.addListener(() => {
+  checkActiveTabContent();
+});
+
+// Listen for alarms
 chrome.alarms.onAlarm.addListener(async (alarm) => {
-  console.log('Alarm triggered:', alarm.name);
   if (alarm.name === 'youtubeSuggestion') {
-    try {
-      // Get the current state and next video URL
-      const { currentState } = await chrome.storage.local.get('currentState');
-      const { nextVideoUrl } = await chrome.storage.local.get('nextVideoUrl');
-      const { topic } = await chrome.storage.sync.get(['topic']);
-
-      if (currentState && currentState.tabId && !currentState.isRelevant) {
-        // Close the irrelevant tab
-        await chrome.tabs.remove(currentState.tabId);
+    const { nextVideoUrl } = await chrome.storage.local.get('nextVideoUrl');
+    const { enabled, topic } = await chrome.storage.sync.get(['enabled', 'topic']);
+    
+    if (enabled && topic && nextVideoUrl) {
+      // Get the current tab ID before opening the new one
+      const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      
+      // Open the video in a new tab
+      await chrome.tabs.create({ url: nextVideoUrl });
+      
+      // Close the previous tab
+      if (currentTab) {
+        await chrome.tabs.remove(currentTab.id);
       }
-
-      if (nextVideoUrl) {
-        console.log('🎥 Opening prepared video URL:', nextVideoUrl);
-        // Ensure the URL is properly encoded
-        const encodedUrl = encodeURI(nextVideoUrl);
-        // Open the prepared video URL in a new tab with focus
-        await chrome.tabs.create({ 
-          url: encodedUrl,
-          active: true // Make the new tab active
-        });
-        await chrome.storage.sync.set({ lastVideoUrl: nextVideoUrl });
-        await chrome.storage.local.remove('nextVideoUrl');
-      } else if (topic) {
-        // If we don't have a prepared video, get one and open it
-        console.log('🔄 Getting new video suggestion for topic:', topic);
-        const videoUrl = await getYoutubeVideoSuggestion(topic);
-        const encodedUrl = encodeURI(videoUrl);
-        await chrome.tabs.create({ 
-          url: encodedUrl,
-          active: true // Make the new tab active
-        });
-        await chrome.storage.sync.set({ lastVideoUrl: videoUrl });
-      }
-
-      // Prepare the next video
-      if (topic) {
-        await prepareNextVideo(topic);
-      }
-    } catch (error) {
-      console.error('Error handling alarm:', error);
+      
+      // Clear the stored video URL
+      await chrome.storage.local.remove('nextVideoUrl');
+      
+      // Reset timer end time
+      await chrome.storage.sync.remove('timerEndTime');
     }
   }
 });
