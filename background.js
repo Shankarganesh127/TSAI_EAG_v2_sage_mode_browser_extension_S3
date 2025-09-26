@@ -36,33 +36,19 @@ Consider:
 3. Should be suitable for learning about the topic
 4. Prefer recent, high-quality content
 
-Format your response EXACTLY like this, including the labels:
+Format your response exactly like this:
 VIDEO_TITLE: [title]
-VIDEO_URL: [full YouTube URL starting with https://]
-REASON: [why this video is relevant]
+VIDEO_URL: [full YouTube URL]
+REASON: [why this video is relevant]`;
 
-IMPORTANT: The URL must be a complete, valid YouTube URL starting with https://`;
-
-    console.log('🎥 Requesting video with prompt:', prompt);
     const response = await GoogleGenerativeAI.generateContent(GEMINI_API_KEY, prompt);
-    console.log('Raw video suggestion response:', response);
-    
-    const urlMatch = response.match(/VIDEO_URL:\s*(https:\/\/(?:www\.)?youtube\.com\/(?:watch\?v=|embed\/|v\/|shorts\/)?[a-zA-Z0-9_-]+(?:\S+)?)/i);
+    const urlMatch = response.match(/VIDEO_URL:\s*(https:\/\/(?:www\.)?youtube\.com\/[^\s]+)/i);
     
     if (!urlMatch) {
-      console.error('No valid YouTube URL found in response:', response);
       throw new Error('No valid YouTube URL found in response');
     }
 
-    // Clean up the URL to ensure it's in the correct format
-    let videoUrl = urlMatch[1].trim();
-    if (!videoUrl.includes('watch?v=')) {
-      const videoId = videoUrl.split('/').pop().split('?')[0];
-      videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    }
-
-    console.log('📺 Extracted video URL:', videoUrl);
-    return videoUrl;
+    return urlMatch[1];
   } catch (error) {
     console.error('❌ Error getting video suggestion:', error);
     return null;
@@ -88,16 +74,12 @@ MATCH: [yes/no]
 CONFIDENCE: [0-100]
 REASON: [brief explanation]`;
     
-    console.log('Comparing topics with prompt:', comparePrompt);
     const result = await GoogleGenerativeAI.generateContent(GEMINI_API_KEY, comparePrompt);
-    console.log('Raw comparison result:', result);
-    
     const matchMatch = result.match(/MATCH:\s*(yes|no)/i);
     const confidenceMatch = result.match(/CONFIDENCE:\s*(\d+)/i);
     const reasonMatch = result.match(/REASON:\s*([^\n]+)/i);
 
     if (!matchMatch || !confidenceMatch) {
-      console.error('Invalid format in result:', result);
       throw new Error('Invalid comparison result format');
     }
 
@@ -381,39 +363,22 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     const { enabled, topic } = await chrome.storage.sync.get(['enabled', 'topic']);
     
     if (enabled && topic && nextVideoUrl) {
-      try {
-        console.log('🔄 Processing alarm for video suggestion...');
-        
-        // Get the current tab
-        const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (!currentTab) {
-          throw new Error('No active tab found');
-        }
-        
-        console.log('📑 Current tab:', currentTab.id, currentTab.url);
-        
-        // Create new tab with video
-        console.log('🎥 Opening video URL:', nextVideoUrl);
-        const newTab = await chrome.tabs.create({ url: nextVideoUrl });
-        console.log('✅ New tab created:', newTab.id);
-        
-        // Short delay to ensure new tab is properly opened
-        await new Promise(resolve => setTimeout(resolve, 500));
-        
-        // Close the previous tab
-        console.log('🔚 Closing previous tab:', currentTab.id);
+      // Get the current tab ID before opening the new one
+      const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      
+      // Open the video in a new tab
+      await chrome.tabs.create({ url: nextVideoUrl });
+      
+      // Close the previous tab
+      if (currentTab) {
         await chrome.tabs.remove(currentTab.id);
-        
-        // Clear stored data
-        await chrome.storage.local.remove('nextVideoUrl');
-        await chrome.storage.sync.remove('timerEndTime');
-        console.log('🧹 Cleared stored video URL and timer');
-        
-      } catch (error) {
-        console.error('❌ Error in alarm handler:', error);
       }
-    } else {
-      console.log('⚠️ Alarm triggered but conditions not met:', { enabled, topic, hasUrl: !!nextVideoUrl });
+      
+      // Clear the stored video URL
+      await chrome.storage.local.remove('nextVideoUrl');
+      
+      // Reset timer end time
+      await chrome.storage.sync.remove('timerEndTime');
     }
   }
 });
