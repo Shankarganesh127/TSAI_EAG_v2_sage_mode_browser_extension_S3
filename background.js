@@ -435,73 +435,81 @@ async function checkActiveTabContent() {
       return;
     }
     
+    if (tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) {
+      console.log('⏭️ Skipping browser internal page');
+      return;
+    }
+    
     console.log('📄 Analyzing Tab:', {
       title: tab.title,
       url: tab.url
     });
 
-    // Inject content script to get page content
-    console.log('📑 Extracting page content...');
-    const [{ result: content }] = await chrome.scripting.executeScript({
+    // Get the page content
+    const content = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: () => {
-        // Get all text content from the page
+      function: () => {
         const extractText = (node) => {
           if (node.nodeType === Node.TEXT_NODE) return node.textContent;
           if (node.nodeType !== Node.ELEMENT_NODE) return '';
           if (['SCRIPT', 'STYLE', 'NOSCRIPT'].includes(node.tagName)) return '';
           return Array.from(node.childNodes).map(extractText).join(' ');
         };
-        const text = extractText(document.body).replace(/\\s+/g, ' ').trim();
-        console.log('📝 Extracted Content Length:', text.length);
-        return text;
-      },
-    });
-    
-    console.log('📊 Content Stats:', {
-      length: content.length,
-      preview: content.substring(0, 100) + '...'
+        return extractText(document.body).replace(/\\s+/g, ' ').trim();
+      }
     });
 
-    const [contentAnalysis, topicClassification] = await Promise.all([
-      analyzeContent(content, topic),
-      classifyTopic(topic)
-    ]);
+    if (!content || !content[0]?.result) {
+      console.log('⚠️ No content found on page');
+      return;
+    }
 
-    console.log('📊 Analysis Results:', {
-      contentAnalysis,
-      topicClassification,
-      isRelevant: contentAnalysis.isRelevant,
-      confidence: contentAnalysis.confidence
-    });
+    const pageText = content[0].result;
+    if (!pageText.trim()) {
+      console.log('⚠️ Empty page content');
+      return;
+    }
 
+    console.log('📝 Retrieved page content:', pageText.slice(0, 100) + '...');
+
+    // Analyze the content
+    const pageTopics = await analyzePageContent(pageText);
+    if (!pageTopics || pageTopics.length === 0) {
+      console.log('⚠️ No topics extracted from page');
+      return;
+    }
+
+    console.log('🏷️ Page topics:', pageTopics);
+
+    // Compare with user's topic
+    const { isRelevant, confidence } = await compareTopics(topic, pageTopics);
+    console.log('🔍 Topic comparison:', { isRelevant, confidence });
+
+    // Save current state for UI
     const currentState = {
-      currentContent: content.substring(0, 100) + "...",
-      contentAnalysis: contentAnalysis.contentTopic,
+      currentContent: pageText.substring(0, 100) + "...",
+      contentTopics: pageTopics,
       selectedTopic: topic,
-      topicClassification: topicClassification,
-      isRelevant: contentAnalysis.isRelevant,
-      confidence: contentAnalysis.confidence || 0,
+      isRelevant: isRelevant,
+      confidence: confidence,
       timestamp: new Date().toISOString(),
       tabId: tab.id
     };
     
     console.log('💾 Saving Current State:', currentState);
-
     await chrome.storage.local.set({ currentState });
 
-    if (contentAnalysis.isRelevant) {
+    // Handle video suggestion based on relevance
+    if (isRelevant && confidence >= 0.7) {
       console.log('✅ Content is relevant to topic, stopping timer');
-      // Stop the timer if content is relevant
       chrome.alarms.clear('youtubeSuggestion');
       await chrome.storage.sync.set({ timerEndTime: null });
     } else {
-      console.log('⚠️ Content is not relevant, checking video status');
+      console.log('⚠️ Content not relevant enough, checking video status');
       // Check if we have a next video ready
       const { nextVideoUrl } = await chrome.storage.local.get('nextVideoUrl');
       if (!nextVideoUrl) {
         console.log('🎥 No video ready, preparing next video suggestion');
-        // Prepare next video if we don't have one
         await prepareNextVideo(topic);
       } else {
         console.log('✓ Next video is already prepared:', nextVideoUrl);
@@ -516,7 +524,7 @@ async function checkActiveTabContent() {
       }
     }
   } catch (error) {
-    console.error('Error checking tab content:', error);
+    console.error('❌ Error checking active tab content:', error);
   }
 }
 
@@ -536,15 +544,99 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
+// Function to analyze content topic using Gemini
+async function analyzePageContent(content) {
+  try {
+    console.log('🔍 Analyzing page content...');
+    const prompt = `Analyze this webpage content and identify its main topic. 
+    Content: "${content.substring(0, 1500)}..."
+    
+    Respond in this exact format:
+    TOPIC: [main topic in 2-3 words]
+    FIELD: [general field/category]
+    KEYWORDS: [5 most relevant keywords]`;
+
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          parts: [{ text: prompt }]
+        }]
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to analyze content');
+    }
+
+    const data = await response.json();
+    console.log('📝 Content Analysis:', data.candidates[0].content.parts[0].text);
+    return data.candidates[0].content.parts[0].text;
+  } catch (error) {
+    console.error('❌ Content analysis error:', error);
+    return null;
+  }
+}
+
+// Function to compare topics
+async function compareTopics(contentAnalysis, selectedTopic) {
+  try {
+    console.log('🔄 Comparing topics:', { contentAnalysis, selectedTopic });
+    const prompt = `Compare these two topics and determine if they are directly related:
+
+    Selected Topic: "${selectedTopic}"
+    Page Content Topic: "${contentAnalysis}"
+
+    Consider:
+    1. Direct topic match
+    2. Parent/child relationship
+    3. Related field/category
+    4. Shared keywords
+
+    Respond with only "yes" or "no" followed by a confidence score (0-100).
+    Format: answer|score`;
+
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          parts: [{ text: prompt }]
+        }]
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to compare topics');
+    }
+
+    const data = await response.json();
+    const result = data.candidates[0].content.parts[0].text.trim().toLowerCase();
+    const [match, score] = result.split('|');
+    
+    console.log('📊 Topic Comparison Result:', { match, score });
+    return {
+      isMatch: match === 'yes',
+      confidence: parseInt(score, 10) || 0
+    };
+  } catch (error) {
+    console.error('❌ Topic comparison error:', error);
+    return { isMatch: false, confidence: 0 };
+  }
+}
+
 // Set up content monitoring
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'startMonitoring') {
+    console.log('▶️ Starting content monitoring');
     if (!contentCheckInterval) {
       contentCheckInterval = setInterval(checkActiveTabContent, 10000); // Check every 10 seconds
       checkActiveTabContent(); // Initial check
     }
     sendResponse({ success: true });
   } else if (message.action === 'stopMonitoring') {
+    console.log('⏹️ Stopping content monitoring');
     if (contentCheckInterval) {
       clearInterval(contentCheckInterval);
       contentCheckInterval = null;
