@@ -61,6 +61,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function classifyTopic(topic) {
   try {
+    console.log('🔍 Topic Classification Request:', {
+      topic,
+      timestamp: new Date().toISOString()
+    });
+
     const classifyPrompt = `Analyze this topic: "${topic}"
 1. What is the main category or field (e.g., Technology, Science, History, etc.)?
 2. What are the key aspects or subtopics?
@@ -69,6 +74,8 @@ Respond in this exact format:
 CATEGORY: [main category]
 ASPECTS: [key aspects separated by commas]
 RELATED: [related topics separated by commas]`;
+
+    console.log('📤 Gemini Prompt (Topic Classification):', classifyPrompt);
 
     const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
       method: 'POST',
@@ -81,19 +88,31 @@ RELATED: [related topics separated by commas]`;
     });
 
     if (!response.ok) {
+      const errorData = await response.json();
+      console.error('❌ Gemini API Error:', errorData);
       throw new Error('Failed to classify topic');
     }
 
     const data = await response.json();
+    console.log('📥 Gemini Response (Topic Classification):', {
+      rawResponse: data,
+      extractedText: data.candidates[0].content.parts[0].text.trim()
+    });
     return data.candidates[0].content.parts[0].text.trim();
   } catch (error) {
-    console.error('Error classifying topic:', error);
+    console.error('❌ Topic Classification Error:', error);
     return null;
   }
 }
 
 async function analyzeContent(content, topic) {
   try {
+    console.log('🔍 Content Analysis Request:', {
+      contentLength: content.length,
+      topic,
+      timestamp: new Date().toISOString()
+    });
+
     // First, get the main topic and context of the content
     const topicPrompt = `Analyze this webpage content and provide:
 1. The main topic or subject matter
@@ -107,6 +126,11 @@ FIELD: [category]
 LEVEL: [level]
 
 Content: "${content.substring(0, 1500)}..."`;
+
+    console.log('📤 Gemini Prompt (Content Analysis):', {
+      prompt: topicPrompt,
+      contentPreview: content.substring(0, 100) + '...'
+    });
     
     const topicResponse = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
       method: 'POST',
@@ -119,12 +143,19 @@ Content: "${content.substring(0, 1500)}..."`;
     });
 
     if (!topicResponse.ok) {
+      const errorData = await topicResponse.json();
+      console.error('❌ Gemini API Error (Content Analysis):', errorData);
       throw new Error('Failed to get content topic');
     }
 
     const topicData = await topicResponse.json();
+    console.log('📥 Gemini Response (Content Analysis):', {
+      rawResponse: topicData,
+      extractedText: topicData.candidates[0].content.parts[0].text.trim()
+    });
     const contentTopic = topicData.candidates[0].content.parts[0].text.trim();
 
+    console.log('🔄 Starting Topic Classification');
     // Get classification for selected topic
     const topicClassification = await classifyTopic(topic);
     
@@ -196,12 +227,19 @@ function isValidYoutubeUrl(url) {
 
 async function getYoutubeVideoSuggestion(topic) {
   try {
+    console.log('🎥 Starting Video Suggestion Request:', {
+      topic,
+      timestamp: new Date().toISOString()
+    });
+
     // Get topic classification first
     const topicClassification = await classifyTopic(topic);
+    console.log('📋 Topic Classification for Video:', topicClassification);
     
     // Get previously suggested videos from storage
     const storageData = await chrome.storage.local.get('suggestedVideoUrls');
     const previousVideos = storageData.suggestedVideoUrls || [];
+    console.log('🎬 Previously Suggested Videos:', previousVideos);
     
     const prompt = `I need a YouTube video suggestion based on this topic analysis:
 ${topicClassification}
@@ -232,20 +270,30 @@ Reply with ONLY the full YouTube video URL and nothing else.`;
     });
 
     if (!response.ok) {
+      const errorData = await response.json();
+      console.error('❌ Gemini API Error (Video Suggestion):', errorData);
       throw new Error('Failed to get video suggestion');
     }
 
     const data = await response.json();
+    console.log('📥 Gemini Response (Video Suggestion):', {
+      rawResponse: data,
+      extractedUrl: data.candidates[0].content.parts[0].text.trim()
+    });
+    
     const videoUrl = data.candidates[0].content.parts[0].text.trim();
     
     // Validate the YouTube URL
+    console.log('🔍 Validating YouTube URL:', videoUrl);
     if (!isValidYoutubeUrl(videoUrl)) {
+      console.error('❌ Invalid YouTube URL received:', videoUrl);
       throw new Error('Invalid YouTube URL received from Gemini');
     }
     
     // Update storage with new video URL
     previousVideos.push(videoUrl);
     await chrome.storage.local.set({ suggestedVideoUrls: previousVideos });
+    console.log('✅ New video URL saved:', videoUrl);
     
     return videoUrl;
   } catch (error) {
