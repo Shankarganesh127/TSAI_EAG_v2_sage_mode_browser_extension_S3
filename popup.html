@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Sage Mode Extension</title>
+  <link rel="stylesheet" type="text/css" href="popup.css">
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="logo">
+        <span class="material-icons">psychology</span>
+      </div>
+      <h1>Sage Mode</h1>
+    </div>
+    
+    <div class="connection-status">
+      <span id="status-indicator" class="status-dot"></span>
+      <span id="status-text">Checking connection...</span>
+    </div>
+
+    <div class="timer-card">
+      <div class="timer-icon">
+        <span class="material-icons">timer</span>
+      </div>
+      <div id="timer-display">00:00</div>
+    </div>
+
+    <div class="settings">
+      <div class="setting-item">
+        <div class="setting-label">
+          <span class="material-icons">power_settings_new</span>
+          <label>Enable AI</label>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="enabled">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="setting-item">
+        <label for="timer">Timer (min)</label>
+        <input type="number" id="timer" min="1" value="5">
+      </div>
+      <div class="setting-item">
+        <label for="topic">Topic Keyword</label>
+        <input type="text" id="topic" placeholder="e.g., 'AI trends'">
+      </div>
+    </div>
+    <div class="video-suggestion" id="video-suggestion" style="display: none;">
+      <div class="setting-item">
+        <div class="setting-label">
+          <span class="material-icons">smart_display</span>
+          <label>Suggested Video</label>
+        </div>
+        <a href="#" id="video-link" target="_blank" class="video-link">
+          <span class="material-icons">open_in_new</span>
+          Watch Video
+        </a>
+      </div>
+    </div>
+    <button id="save">Save & Start</button>
+    <div class="content-status">
+      <div class="status-label">Current Content:</div>
+      <div id="current-content" class="content-text">No active content</div>
+      <div class="content-match" id="content-match">
+        <span class="match-dot"></span>
+        <span class="match-text">Checking content match...</span>
+      </div>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

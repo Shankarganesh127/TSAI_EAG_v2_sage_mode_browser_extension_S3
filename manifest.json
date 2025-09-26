@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Sage Mode Extension",
+  "version": "1.0",
+  "description": "Get YouTube video suggestions from Gemini AI.",
+  "permissions": [
+    "storage",
+    "alarms",
+    "activeTab",
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://generativelanguage.googleapis.com/",
+    "https://*.googleapis.com/"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}
