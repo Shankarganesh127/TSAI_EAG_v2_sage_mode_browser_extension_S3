@@ -213,42 +213,53 @@ Format: [yes/no]|[score]`;
   }
 }
 
-async function isValidYoutubeUrl(url) {
+function extractVideoId(url) {
   try {
-    // First check URL format
     const urlObj = new URL(url);
     if (!(urlObj.hostname === 'www.youtube.com' || urlObj.hostname === 'youtube.com')) {
-      console.log('❌ Invalid YouTube domain:', urlObj.hostname);
-      return false;
+      return null;
     }
     
-    if (!urlObj.pathname.startsWith('/watch')) {
-      console.log('❌ Not a video URL:', urlObj.pathname);
-      return false;
+    if (urlObj.pathname === '/watch') {
+      return urlObj.searchParams.get('v');
     }
     
-    const videoId = urlObj.searchParams.get('v');
+    if (urlObj.pathname.startsWith('/v/')) {
+      return urlObj.pathname.split('/')[2];
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('❌ Error parsing URL:', error);
+    return null;
+  }
+}
+
+function isYouTubeUrl(url) {
+  try {
+    const urlObj = new URL(url);
+    return urlObj.hostname === 'www.youtube.com' || urlObj.hostname === 'youtube.com';
+  } catch {
+    return false;
+  }
+}
+
+async function isValidYoutubeUrl(url) {
+  try {
+    console.log('🔍 Validating YouTube URL:', url);
+    
+    if (!isYouTubeUrl(url)) {
+      console.log('❌ Not a YouTube URL');
+      return false;
+    }
+
+    const videoId = extractVideoId(url);
     if (!videoId) {
-      console.log('❌ No video ID found in URL');
+      console.log('❌ Could not extract video ID');
       return false;
     }
 
-    // Now check if video exists and is available
-    console.log('🔍 Checking video availability for ID:', videoId);
-    const response = await fetch(`https://www.youtube.com/oembed?url=${url}&format=json`);
-    
-    if (!response.ok) {
-      console.log('❌ Video not available or not public');
-      return false;
-    }
-
-    const data = await response.json();
-    console.log('✅ Video found:', {
-      title: data.title,
-      author: data.author_name,
-      type: data.type
-    });
-    
+    console.log('✅ Valid YouTube URL format with video ID:', videoId);
     return true;
   } catch (error) {
     console.error('❌ Error validating YouTube URL:', error);
@@ -271,6 +282,19 @@ async function getYoutubeVideoSuggestion(topic) {
     const storageData = await chrome.storage.local.get('suggestedVideoUrls');
     const previousVideos = storageData.suggestedVideoUrls || [];
     console.log('🎬 Previously Suggested Videos:', previousVideos);
+
+    // Prepare a list of popular educational channels
+    const popularChannels = [
+      'TED',
+      'TEDx Talks',
+      'MIT OpenCourseWare',
+      'Stanford',
+      'Google Developers',
+      'freeCodeCamp.org',
+      'Coursera',
+      'Khan Academy',
+      'Udacity'
+    ].join(', ');
     
     const prompt = `Search for and suggest a YouTube video about this topic:
 ${topicClassification}
@@ -315,21 +339,33 @@ Do not include any text, explanation, or formatting - just the raw YouTube URL.`
       extractedUrl: data.candidates[0].content.parts[0].text.trim()
     });
     
-    let videoUrl = data.candidates[0].content.parts[0].text.trim();
+    const responseText = data.candidates[0].content.parts[0].text.trim();
+    console.log('📝 Raw response:', responseText);
     
-    // Clean up the URL
-    videoUrl = videoUrl.replace(/[\n\r\t]/g, '').trim();
-    if (!videoUrl.startsWith('http')) {
-      videoUrl = 'https://' + videoUrl;
+    // Extract URL using regex
+    const urlMatch = responseText.match(/https?:\/\/(www\.)?youtube\.com\/watch\?v=[a-zA-Z0-9_-]+/);
+    if (!urlMatch) {
+      throw new Error('No valid YouTube URL found in response');
     }
     
-    // Validate the YouTube URL
-    console.log('🔍 Validating YouTube URL:', videoUrl);
+    let videoUrl = urlMatch[0];
+    console.log('🔍 Extracted video URL:', videoUrl);
     
-    // Try up to 3 times to get a valid video
+    // Validate the YouTube URL
     let maxRetries = 3;
-    while (maxRetries > 0) {
+    let currentTry = 1;
+    
+    while (currentTry <= maxRetries) {
+      console.log(`📍 Attempt ${currentTry}/${maxRetries}`);
+      
       if (await isValidYoutubeUrl(videoUrl)) {
+        // Check if this video was already suggested
+        if (previousVideos.includes(videoUrl)) {
+          console.log('⚠️ Video was previously suggested, trying again');
+          currentTry++;
+          continue;
+        }
+        
         // Update storage with new video URL
         previousVideos.push(videoUrl);
         await chrome.storage.local.set({ suggestedVideoUrls: previousVideos });
@@ -337,24 +373,31 @@ Do not include any text, explanation, or formatting - just the raw YouTube URL.`
         return videoUrl;
       }
       
-      console.log(`⚠️ Retry ${4 - maxRetries}/3: Getting new video suggestion`);
-      maxRetries--;
-      
-      if (maxRetries > 0) {
-        // Try getting another video suggestion
+      if (currentTry < maxRetries) {
+        console.log(`⚠️ Retry ${currentTry}/${maxRetries}: Getting new video suggestion`);
+        const retryPrompt = `Give me a different educational YouTube video URL about "${topic}" from one of these channels: ${popularChannels}. The video must be from the last 2 years and be a full video (not a Short). Only return the video URL, nothing else.`;
+        
         const retryResponse = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             contents: [{
-              parts: [{ text: prompt }]
+              parts: [{ text: retryPrompt }]
             }]
           })
         });
         
         const retryData = await retryResponse.json();
-        videoUrl = retryData.candidates[0].content.parts[0].text.trim().replace(/[\n\r\t]/g, '');
+        const retryText = retryData.candidates[0].content.parts[0].text.trim();
+        const retryMatch = retryText.match(/https?:\/\/(www\.)?youtube\.com\/watch\?v=[a-zA-Z0-9_-]+/);
+        
+        if (retryMatch) {
+          videoUrl = retryMatch[0];
+          console.log('🔄 Got new video URL:', videoUrl);
+        }
       }
+      
+      currentTry++;
     }
     
     console.error('❌ Failed to get valid YouTube video after 3 attempts');
