@@ -24,11 +24,16 @@ document.addEventListener('DOMContentLoaded', () => {
       const contentText = document.getElementById('current-content');
       const matchDot = document.querySelector('.match-dot');
       const matchText = document.querySelector('.match-text');
+      const selectedTopicElement = document.getElementById('selected-topic');
+      const contentTopicElement = document.getElementById('content-topic');
 
       if (currentState) {
         contentText.textContent = currentState.currentContent;
+        selectedTopicElement.textContent = currentState.selectedTopic || 'None';
+        contentTopicElement.textContent = currentState.contentTopic || 'Analyzing...';
+        
         matchDot.className = `match-dot ${currentState.isRelevant ? 'matched' : 'not-matched'}`;
-        matchText.textContent = currentState.isRelevant ? 'Content matches topic' : 'Content does not match topic';
+        matchText.textContent = currentState.isRelevant ? 'Topics match' : 'Topics do not match';
         matchText.style.color = currentState.isRelevant ? '#2ecc71' : '#e74c3c';
       }
     });

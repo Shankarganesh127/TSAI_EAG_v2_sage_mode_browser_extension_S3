@@ -61,14 +61,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function analyzeContent(content, topic) {
   try {
-    const prompt = `Analyze if this webpage content is directly related to the topic "${topic}". Consider the main theme and subject matter. The content should be specifically about this topic, not just mentioning it. Reply with ONLY "yes" or "no" and nothing else: "${content}"`;
+    // First, get the main topic of the content
+    const topicPrompt = `Analyze this webpage content and tell me its main topic or subject matter in 2-3 words: "${content.substring(0, 1000)}..."`;
+    
+    const topicResponse = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          parts: [{ text: topicPrompt }]
+        }]
+      })
+    });
+
+    if (!topicResponse.ok) {
+      throw new Error('Failed to get content topic');
+    }
+
+    const topicData = await topicResponse.json();
+    const contentTopic = topicData.candidates[0].content.parts[0].text.trim();
+
+    // Now compare the topics
+    const comparePrompt = `Compare these two topics and tell me if they are directly related. Reply with ONLY "yes" or "no":
+    Topic 1: "${topic}"
+    Topic 2: "${contentTopic}"`;
     
     const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{
-          parts: [{ text: prompt }]
+          parts: [{ text: comparePrompt }]
         }]
       })
     });
@@ -79,9 +102,27 @@ async function analyzeContent(content, topic) {
 
     const data = await response.json();
     const answer = data.candidates[0].content.parts[0].text.trim().toLowerCase();
-    return answer === 'yes';
+    return {
+      contentTopic,
+      isRelevant: answer === 'yes'
+    };
   } catch (error) {
     console.error('Error analyzing content:', error);
+    return {
+      contentTopic: 'Error analyzing content',
+      isRelevant: false
+    };
+  }
+}
+
+function isValidYoutubeUrl(url) {
+  try {
+    const urlObj = new URL(url);
+    return (
+      (urlObj.hostname === 'www.youtube.com' || urlObj.hostname === 'youtube.com') &&
+      (urlObj.pathname === '/watch' || urlObj.pathname.startsWith('/playlist'))
+    );
+  } catch {
     return false;
   }
 }
@@ -114,6 +155,11 @@ async function getYoutubeVideoSuggestion(topic) {
 
     const data = await response.json();
     const videoUrl = data.candidates[0].content.parts[0].text.trim();
+    
+    // Validate the YouTube URL
+    if (!isValidYoutubeUrl(videoUrl)) {
+      throw new Error('Invalid YouTube URL received from Gemini');
+    }
     
     // Update storage with new video URL
     previousVideos.push(videoUrl);
@@ -160,10 +206,12 @@ async function checkActiveTabContent() {
       },
     });
 
-    const isRelevant = await analyzeContent(content, topic);
+    const analysis = await analyzeContent(content, topic);
     const currentState = {
       currentContent: content.substring(0, 100) + "...",
-      isRelevant,
+      contentTopic: analysis.contentTopic,
+      selectedTopic: topic,
+      isRelevant: analysis.isRelevant,
       timestamp: new Date().toISOString(),
       tabId: tab.id
     };
@@ -234,10 +282,31 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   console.log('Alarm triggered:', alarm.name);
   if (alarm.name === 'youtubeSuggestion') {
     try {
+      // Get the current state and next video URL
+      const { currentState } = await chrome.storage.local.get('currentState');
+      const { nextVideoUrl } = await chrome.storage.local.get('nextVideoUrl');
       const { topic } = await chrome.storage.sync.get(['topic']);
-      if (topic) {
+
+      if (currentState && currentState.tabId && !currentState.isRelevant) {
+        // Close the irrelevant tab
+        await chrome.tabs.remove(currentState.tabId);
+      }
+
+      if (nextVideoUrl) {
+        // Open the prepared video URL in a new tab
+        await chrome.tabs.create({ url: nextVideoUrl });
+        await chrome.storage.sync.set({ lastVideoUrl: nextVideoUrl });
+        await chrome.storage.local.remove('nextVideoUrl');
+      } else if (topic) {
+        // If we don't have a prepared video, get one and open it
         const videoUrl = await getYoutubeVideoSuggestion(topic);
+        await chrome.tabs.create({ url: videoUrl });
         await chrome.storage.sync.set({ lastVideoUrl: videoUrl });
+      }
+
+      // Prepare the next video
+      if (topic) {
+        await prepareNextVideo(topic);
       }
     } catch (error) {
       console.error('Error handling alarm:', error);
