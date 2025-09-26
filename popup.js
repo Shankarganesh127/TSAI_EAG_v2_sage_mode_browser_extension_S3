@@ -114,6 +114,13 @@ document.addEventListener('DOMContentLoaded', () => {
   updateTimerDisplay();
   timerInterval = setInterval(updateTimerDisplay, 1000);
 
+  // Listen for content state updates
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.action === 'contentStateUpdate') {
+      updateContentStatus(message.state);
+    }
+  });
+
   saveButton.addEventListener('click', () => {
     const enabled = enabledCheckbox.checked;
     const timer = parseInt(timerInput.value, 10);
@@ -121,17 +128,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (enabled) {
       const timerEndTime = Date.now() + timer * 60 * 1000;
-      chrome.storage.sync.set({ enabled, timer, topic, timerEndTime }, () => {
-        console.log('Settings saved and timer started');
+      chrome.storage.sync.set({ enabled, timer, topic, timerEndTime, isMonitoring: true }, () => {
+        console.log('Settings saved and monitoring started');
         chrome.alarms.create('youtubeSuggestion', { delayInMinutes: timer });
         updateTimerDisplay();
         if (timerInterval) clearInterval(timerInterval);
         timerInterval = setInterval(updateTimerDisplay, 1000);
+        // Trigger immediate content check
+        chrome.runtime.sendMessage({ action: 'checkContent' });
         window.close();
       });
     } else {
-      chrome.storage.sync.set({ enabled, timer, topic, timerEndTime: null }, () => {
-        console.log('Settings saved and timer cleared');
+      chrome.storage.sync.set({ enabled, timer, topic, timerEndTime: null, isMonitoring: false }, () => {
+        console.log('Settings saved and monitoring stopped');
         chrome.alarms.clear('youtubeSuggestion');
         if (timerInterval) clearInterval(timerInterval);
         timerDisplay.textContent = '00:00';

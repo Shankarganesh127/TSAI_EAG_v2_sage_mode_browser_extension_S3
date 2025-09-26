@@ -526,20 +526,26 @@ async function checkActiveTabContent() {
   try {
     console.log('🔄 Starting Active Tab Content Check');
     
-    const { enabled, topic } = await chrome.storage.sync.get(['enabled', 'topic']);
-    if (!enabled || !topic) {
-      console.log('⏸️ Extension disabled or no topic set:', { enabled, topic });
+    const { enabled, topic, isMonitoring } = await chrome.storage.sync.get(['enabled', 'topic', 'isMonitoring']);
+    if (!enabled || !topic || !isMonitoring) {
+      console.log('⏸️ Extension state:', { enabled, topic, isMonitoring });
+      // Update extension icon to indicate monitoring state
+      await chrome.action.setBadgeText({ text: '' });
       return;
     }
 
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab) {
       console.log('⚠️ No active tab found');
+      await chrome.action.setBadgeText({ text: '?' });
+      await chrome.action.setBadgeBackgroundColor({ color: '#95a5a6' });
       return;
     }
     
     if (tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) {
       console.log('⏭️ Skipping browser internal page');
+      await chrome.action.setBadgeText({ text: '-' });
+      await chrome.action.setBadgeBackgroundColor({ color: '#95a5a6' });
       return;
     }
     
@@ -602,13 +608,25 @@ async function checkActiveTabContent() {
     console.log('💾 Saving Current State:', currentState);
     await chrome.storage.local.set({ currentState });
 
-    // Handle video suggestion based on relevance
+    // Update extension icon based on content relevance
     if (isRelevant && confidence >= 0.7) {
       console.log('✅ Content is relevant to topic, stopping timer');
+      // Set green indicator
+      await chrome.action.setBadgeText({ text: '✓' });
+      await chrome.action.setBadgeBackgroundColor({ color: '#2ecc71' });
+      // Stop timer
       chrome.alarms.clear('youtubeSuggestion');
       await chrome.storage.sync.set({ timerEndTime: null });
+      // Broadcast state update
+      chrome.runtime.sendMessage({ 
+        action: 'contentStateUpdate', 
+        state: { isRelevant: true, confidence }
+      });
     } else {
       console.log('⚠️ Content not relevant enough, checking video status');
+      // Set red indicator
+      await chrome.action.setBadgeText({ text: '!' });
+      await chrome.action.setBadgeBackgroundColor({ color: '#e74c3c' });
       // Check if we have a next video ready
       const { nextVideoUrl } = await chrome.storage.local.get('nextVideoUrl');
       if (!nextVideoUrl) {
@@ -617,6 +635,11 @@ async function checkActiveTabContent() {
       } else {
         console.log('✓ Next video is already prepared:', nextVideoUrl);
       }
+      // Broadcast state update
+      chrome.runtime.sendMessage({ 
+        action: 'contentStateUpdate', 
+        state: { isRelevant: false, confidence }
+      });
 
       // Restart timer if not already running
       const { timerEndTime } = await chrome.storage.sync.get('timerEndTime');
@@ -729,22 +752,35 @@ async function compareTopics(contentAnalysis, selectedTopic) {
   }
 }
 
-// Set up content monitoring
+// Set up continuous tab monitoring
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  console.log('👁️ Tab activated:', activeInfo.tabId);
+  await checkActiveTabContent();
+});
+
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'complete' && tab.active) {
+    console.log('📄 Active tab updated:', tabId);
+    await checkActiveTabContent();
+  }
+});
+
+// Set up content monitoring messages
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'startMonitoring') {
     console.log('▶️ Starting content monitoring');
-    if (!contentCheckInterval) {
-      contentCheckInterval = setInterval(checkActiveTabContent, 10000); // Check every 10 seconds
-      checkActiveTabContent(); // Initial check
-    }
+    chrome.storage.sync.set({ isMonitoring: true });
+    checkActiveTabContent(); // Initial check
     sendResponse({ success: true });
   } else if (message.action === 'stopMonitoring') {
     console.log('⏹️ Stopping content monitoring');
-    if (contentCheckInterval) {
-      clearInterval(contentCheckInterval);
-      contentCheckInterval = null;
-    }
+    chrome.storage.sync.set({ isMonitoring: false });
     sendResponse({ success: true });
+  } else if (message.action === 'checkContent') {
+    checkActiveTabContent()
+      .then(() => sendResponse({ success: true }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
   }
   return true;
 });
