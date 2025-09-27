@@ -149,49 +149,76 @@ REASON: <concise>`;
 	}catch{ return {isRelevant:false,confidence:0,reason:'Comparison failed'}; }
 }
 
+/**
+ * Uses the Gemini model to suggest a single, relevant YouTube video URL for a given topic.
+ * @param {string} topic The topic to search for.
+ * @returns {Promise<string | null>} The canonical YouTube URL or null.
+ */
 async function suggestVideo(topic){
-    if(!API_KEY) return null;
-    const debugLog=[];
-    // Single lightweight prompt
-    const prompt=`Provide ONE YouTube video URL helpful for topic: ${topic}. Only output the URL.`;
+    // Ensure API_KEY is defined. (Assumes it's available in this scope)
+    if(typeof API_KEY === 'undefined' || !API_KEY) return null;
+    
+    const debugLog = [];
+    let resultUrl = null; // Variable to hold the final URL
+
     try {
-        const raw=await gem(prompt);
+        // --- Attempt 1: Strict URL-only prompt ---
+        const prompt = `Provide ONE YouTube video URL helpful for topic: ${topic}. Output the URL ONLY, do not include any other text, markdown, or explanation.`;
+        const raw = await gem(prompt);
         debugLog.push({phase:'raw',snippet:raw.slice(0,180)});
-        const url=extractFirstYoutubeUrl(raw);
-        if(url){ chrome.storage.local.set({suggestionDebug:debugLog}); return url; }
-        // Retry with a stricter instruction if first failed
-        const retryPrompt=`Only output a single canonical YouTube watch URL (https://www.youtube.com/watch?v=VIDEOID) for topic: ${topic}.`;
-        const raw2=await gem(retryPrompt);
+        resultUrl = extractFirstYoutubeUrl(raw);
+
+        if (resultUrl) {
+            return resultUrl;
+        }
+
+        // --- Attempt 2: Retry with explicit canonical format instruction ---
+        const retryPrompt = `Return the canonical YouTube watch URL (https://www.youtube.com/watch?v=VIDEOID) for a video about ${topic}. Output the URL ONLY.`;
+        const raw2 = await gem(retryPrompt);
         debugLog.push({phase:'retry',snippet:raw2.slice(0,180)});
-        const url2=extractFirstYoutubeUrl(raw2);
-        if(url2){ chrome.storage.local.set({suggestionDebug:debugLog}); return url2; }
-    } catch(e){ debugLog.push({phase:'error',error:e.message}); }
-    chrome.storage.local.set({suggestionDebug:debugLog});
+        resultUrl = extractFirstYoutubeUrl(raw2);
+
+        if (resultUrl) {
+            return resultUrl;
+        }
+
+    } catch(e) { 
+        // Log network or API errors
+        debugLog.push({phase:'error',error:e.message}); 
+        // The function will fall through to the 'finally' block
+    } finally {
+        // CRITICAL FIX: Use a finally block to ensure debug logging always runs, 
+        // even on success or error. Added a check for chrome environment.
+        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+            chrome.storage.local.set({suggestionDebug: debugLog});
+        }
+    }
+
     return null;
 }
 
-// Simple first-match extraction & canonicalization
+/**
+ * Reliably extracts and canonicalizes the first 11-character YouTube video ID
+ * found in a text string into the standard watch URL format.
+ * @param {string} text The text output from the model.
+ * @returns {string | null} The canonical YouTube URL or null if no ID is found.
+ */
 function extractFirstYoutubeUrl(text){
-    if(!text) return null;
-    // Accept watch urls or youtu.be short form
-    const regex=/(https?:\/\/(?:www\.)?youtube\.com\/watch\?[^\s"'<>]+|https?:\/\/youtu\.be\/([A-Za-z0-9_-]{11}))/i;
-    const m=regex.exec(text);
-    if(!m) return null;
-    let url=m[0].trim();
-    // Normalize trailing punctuation
-    url=url.replace(/[)\]}>,.;:'"`]+$/,'');
-    // Short form -> canonical
-    const short=url.match(/https?:\/\/youtu\.be\/([A-Za-z0-9_-]{11})/i);
-    if(short){ return `https://www.youtube.com/watch?v=${short[1]}`; }
-    try {
-        const u=new URL(url);
-        if(u.hostname.includes('youtube.com') && u.pathname==='/watch'){
-            const vid=u.searchParams.get('v');
-            if(vid && /^[A-Za-z0-9_-]{11}$/.test(vid)){
-                return `https://www.youtube.com/watch?v=${vid}`;
-            }
-        }
-    } catch{}
+    if(!text || typeof text !== 'string') return null;
+
+    // Comprehensive regex to extract the 11-character video ID from:
+    // - youtu.be/VIDEOID
+    // - youtube.com/watch?v=VIDEOID (and ignores extra query params)
+    // - youtube.com/shorts/VIDEOID
+    const videoIdRegex = /(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:.*&)?v=|(?:embed|v|shorts)\/))([a-zA-Z0-9_-]{11})/;
+    const match = text.match(videoIdRegex);
+
+    if (match && match[1]) {
+        const videoId = match[1];
+        // Always return the clean, canonical watch URL (https://www.youtube.com/watch?v=VIDEOID)
+        return `https://www.youtube.com/watch?v=${videoId}`;
+    }
+    
     return null;
 }
 
