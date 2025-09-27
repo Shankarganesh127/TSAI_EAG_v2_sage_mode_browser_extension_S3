@@ -77,10 +77,39 @@ async function compare(pageCategory,pageTopic,userTopic){
 
 async function suggestVideo(topic){
 	if(!API_KEY) return null; const trusted=TRUSTED_CHANNEL_PATTERNS; const triedIds=new Set();
-	async function verify(url){ try { const r=await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(url)}`); if(!r.ok) return {ok:false,reason:'oEmbed status '+r.status}; const j=await r.json().catch(()=>null); if(!j||!j.title) return {ok:false,reason:'oEmbed missing title'}; return {ok:true}; } catch(e){ return {ok:false,reason:'oEmbed fetch error '+e.message}; } }
+	// Soft-fail statuses: treat as inconclusive (video may still load even if oEmbed blocked)
+	const SOFT_FAIL_STATUSES = new Set([401,403,404,429]);
+	const debugLog = [];
+	async function verify(url){
+		try {
+			const r=await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(url)}`);
+			if(!r.ok){ return {ok:false, status:r.status, reason:'oEmbed status '+r.status}; }
+			const j=await r.json().catch(()=>null);
+			if(!j||!j.title) return {ok:false,reason:'oEmbed missing title'};
+			return {ok:true};
+		} catch(e){ return {ok:false,reason:'oEmbed fetch error '+e.message}; }
+	}
 	const base=(a)=>`Return ONLY one viable, currently accessible YouTube educational video.\nTopic: ${topic}\nRules:\n - Channel must be one of (case-insensitive contains): ${trusted.join(', ')}\n - Prefer upload year >= 2023\n - MUST use canonical watch URL form: https://www.youtube.com/watch?v=VIDEOID (11 chars)\n - NO playlists (no &list=), NO shorts (/shorts/), NO youtu.be links, NO live streams\n - If prior attempt invalid${a? ' (bad/unavailable/duplicate)':''}, choose a different trusted channel.\nOutput EXACTLY:\nVIDEO_URL: https://www.youtube.com/watch?v=XXXXXXXXXXX\nCHANNEL: <channel name>`;
 	function parse(raw){ if(!raw) return {ok:false,reason:'empty raw'}; const m=raw.match(/VIDEO_URL:\s*(https:\/\/www\.youtube\.com\/watch\?v=([A-Za-z0-9_-]{11}))/i); if(!m) return {ok:false,reason:'no watch url'}; const url=m[1]; const id=m[2]; if(triedIds.has(id)) return {ok:false,reason:'duplicate id'}; if(/(&|\?)list=|shorts\//i.test(url)) return {ok:false,reason:'playlist/shorts disallowed'}; const chm=raw.match(/CHANNEL:\s*([^\n]+)/i); const ch=(chm? chm[1].trim():'').toLowerCase(); if(!ch) return {ok:false,reason:'missing channel'}; if(!trusted.some(p=>ch.includes(p))) return {ok:false,reason:'untrusted channel'}; return {ok:true,url,id}; }
-	for(let a=0;a<5;a++){ try{ const raw=await gem(base(a)); const p=parse(raw); if(!p.ok){ console.warn('[SageMode] suggestion reject:',p.reason); continue;} triedIds.add(p.id); const v=await verify(p.url); if(v.ok) return p.url; console.warn('[SageMode] oEmbed reject:',v.reason);} catch(e){ console.warn('[SageMode] suggestion attempt error',e.message);} }
+
+	let fallback=null; let fallbackMeta=null;
+	for(let a=0;a<5;a++){
+		try {
+			const raw=await gem(base(a));
+			const parsed=parse(raw);
+			debugLog.push({attempt:a+1,rawSnippet:raw? raw.slice(0,140):'EMPTY',parsedOk:parsed.ok,reason:parsed.reason});
+			if(!parsed.ok){ console.warn('[SageMode] suggestion reject:', parsed.reason); continue; }
+			triedIds.add(parsed.id);
+			const ver=await verify(parsed.url);
+			if(ver.ok){ console.log('[SageMode] video verified via oEmbed'); chrome.storage.local.set({suggestionDebug:debugLog}); return parsed.url; }
+			// Soft fail acceptance path
+			if(SOFT_FAIL_STATUSES.has(ver.status)){ console.warn('[SageMode] oEmbed soft-fail (accepting anyway):', ver.reason); chrome.storage.local.set({suggestionDebug:debugLog}); return parsed.url; }
+			console.warn('[SageMode] oEmbed hard reject:', ver.reason);
+			if(!fallback){ fallback=parsed.url; fallbackMeta=ver.reason; }
+		} catch(e){ console.warn('[SageMode] suggestion attempt error', e.message); debugLog.push({attempt:a+1,error:e.message}); }
+	}
+	if(fallback){ console.warn('[SageMode] using fallback candidate despite verification issues:', fallbackMeta); chrome.storage.local.set({suggestionDebug:debugLog}); return fallback; }
+	chrome.storage.local.set({suggestionDebug:debugLog});
 	return null;
 }
 
@@ -138,7 +167,56 @@ chrome.runtime.onMessage.addListener((req,_s,sendResponse)=>{
 
 chrome.tabs.onUpdated.addListener((_id,info)=>{ if(info.status==='complete') scheduleCheck(); });
 chrome.tabs.onActivated.addListener(()=> scheduleCheck());
-chrome.alarms.onAlarm.addListener(async alarm=>{ if(alarm.name==='youtubeSuggestion'){ const {nextVideoUrl}=await chrome.storage.local.get('nextVideoUrl'); const {enabled,topic}=await chrome.storage.sync.get(['enabled','topic']); if(enabled&&topic&&nextVideoUrl){ let openUrl=nextVideoUrl; try { const v=await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(openUrl)}`); if(!v.ok){ console.warn('[SageMode] Stored video failed oEmbed verification (status '+v.status+'), attempting replacement'); const repl=await suggestVideo(topic); if(repl){ openUrl=repl; chrome.storage.local.set({nextVideoUrl:openUrl}); } else { chrome.storage.local.remove('nextVideoUrl'); chrome.storage.sync.remove('timerEndTime'); return; } } } catch(e){ console.warn('[SageMode] verification error before open',e.message); } const [currentTab]=await chrome.tabs.query({active:true,currentWindow:true}); await chrome.tabs.create({url:openUrl}); if(currentTab) chrome.tabs.remove(currentTab.id).catch(()=>{}); chrome.storage.local.remove('nextVideoUrl'); chrome.storage.sync.remove('timerEndTime'); } }});
+chrome.alarms.onAlarm.addListener(async alarm=>{
+	if(alarm.name!=='youtubeSuggestion') return;
+	try {
+		const {enabled,topic}=await chrome.storage.sync.get(['enabled','topic']);
+		if(!enabled||!topic){ return; }
+		let {nextVideoUrl}=await chrome.storage.local.get('nextVideoUrl');
+		// If we somehow lost the stored URL, attempt to fetch one now before giving up
+		if(!nextVideoUrl){
+			console.log('[SageMode] No stored video at alarm time; generating on-demand...');
+			nextVideoUrl = await suggestVideo(topic);
+			if(nextVideoUrl) await chrome.storage.local.set({nextVideoUrl});
+		}
+		if(!nextVideoUrl){
+			console.warn('[SageMode] Unable to obtain a suggestion; aborting open.');
+			chrome.runtime.sendMessage({action:'suggestionFailed',reason:'No valid suggestion available'});
+			chrome.storage.sync.remove('timerEndTime');
+			return;
+		}
+		let openUrl = nextVideoUrl;
+		// Validate (with up to 2 replacement attempts total)
+		for(let attempt=0; attempt<2; attempt++){
+			try {
+				const v = await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(openUrl)}`);
+				if(v.ok){ break; }
+				console.warn(`[SageMode] oEmbed failed (status ${v.status}) for attempt ${attempt+1}`);
+			} catch(e){ console.warn('[SageMode] oEmbed network error attempt '+(attempt+1)+':', e.message); }
+			const repl = await suggestVideo(topic);
+			if(!repl){
+				if(attempt===1){
+					chrome.runtime.sendMessage({action:'suggestionFailed',reason:'All replacement attempts failed'});
+					chrome.storage.local.remove('nextVideoUrl');
+					chrome.storage.sync.remove('timerEndTime');
+					return;
+				}
+			} else {
+				openUrl = repl; await chrome.storage.local.set({nextVideoUrl:openUrl});
+			}
+		}
+		const [currentTab]=await chrome.tabs.query({active:true,currentWindow:true});
+		await chrome.tabs.create({url:openUrl});
+		if(currentTab) chrome.tabs.remove(currentTab.id).catch(()=>{});
+		chrome.storage.local.remove('nextVideoUrl');
+		chrome.storage.sync.remove('timerEndTime');
+		chrome.runtime.sendMessage({action:'suggestionOpened',url:openUrl});
+	} catch(e){
+		console.error('[SageMode] Error during alarm handling:', e);
+		chrome.runtime.sendMessage({action:'suggestionFailed',reason:e.message||'Unknown error'});
+		chrome.storage.sync.remove('timerEndTime');
+	}
+});
 
 chrome.runtime.onInstalled.addListener(()=>{ chrome.storage.sync.get(['enabled','timer'],r=>{ if(r.enabled===undefined) chrome.storage.sync.set({enabled:false}); if(r.timer===undefined) chrome.storage.sync.set({timer:5}); }); });
 
