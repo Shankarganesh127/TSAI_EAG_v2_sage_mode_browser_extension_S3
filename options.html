@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Sage Mode Settings</title>
+  <link rel="stylesheet" href="options.css" />
+</head>
+<body>
+  <div class="container">
+    <h1>Sage Mode Settings</h1>
+    <section>
+      <h2>Gemini API Key</h2>
+      <p>Your key is stored locally in chrome.storage.sync. It is never sent anywhere except directly to Google's Gemini API.</p>
+      <input id="api-key" type="password" placeholder="Enter Gemini API Key" autocomplete="off" />
+      <div class="actions">
+        <button id="save-key">Save Key</button>
+        <button id="test-key">Test Connection</button>
+        <button id="clear-key" class="danger">Clear Key</button>
+      </div>
+      <div id="key-status" class="status"></div>
+    </section>
+    <section class="info">
+      <h2>Badge Legend</h2>
+      <ul>
+        <li><strong>✓</strong> Page relevant</li>
+        <li><strong>!</strong> Off-topic (timer running)</li>
+        <li><strong>KEY</strong> API key missing</li>
+        <li><strong>x</strong> Error during analysis</li>
+      </ul>
+    </section>
+  </div>
+  <script src="options.js"></script>
+</body>
+</html>

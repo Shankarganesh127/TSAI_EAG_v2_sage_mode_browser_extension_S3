@@ -2,7 +2,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const enabledCheckbox = document.getElementById('enabled');
   const timerInput = document.getElementById('timer');
   const topicInput = document.getElementById('topic');
-  const apiKeyInput = document.getElementById('api-key');
+  const openSettingsBtn = document.getElementById('open-settings');
   const saveButton = document.getElementById('save');
   const timerDisplay = document.getElementById('timer-display');
   const statusDot = document.getElementById('status-indicator');
@@ -46,13 +46,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Check Gemini API connection with timeout and retry
   function checkConnection(retryCount = 0) {
-    const keyVal = apiKeyInput.value.trim();
-    if(!keyVal){
-      statusDot.className = 'status-dot error';
-      statusText.textContent = 'Missing API Key';
-      statusText.style.color = '#e74c3c';
-      return; // don't attempt connection without key
-    }
     const connectionTimeout = setTimeout(() => {
       if (retryCount < 2) {
         console.log(`Connection timeout, retrying (${retryCount + 1}/2)...`);
@@ -111,12 +104,16 @@ document.addEventListener('DOMContentLoaded', () => {
       enabledCheckbox.checked = settings.enabled || false;
       timerInput.value = settings.timer || 5;
       topicInput.value = settings.topic || '';
-      apiKeyInput.value = settings.apiKey || '';
       
       // Update extension state in background
       updateExtensionState(settings.enabled, settings.topic, settings.timer);
-      // attempt connection if key present
-      if(settings.apiKey) checkConnection();
+      if(settings.apiKey) {
+        checkConnection();
+      } else {
+        statusDot.className = 'status-dot error';
+        statusText.textContent = 'Set API Key (API Settings)';
+        statusText.style.color = '#e67e22';
+      }
     });
   }
 
@@ -141,12 +138,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const enabled = enabledCheckbox.checked;
     const timer = parseInt(timerInput.value,10);
     const topic = topicInput.value.trim();
-    const apiKey = apiKeyInput.value.trim();
-
-    if(!apiKey){
-      alert('Please enter your Gemini API key.');
-      return;
-    }
+    // API key handled in options page; allow enable but will show KEY badge until set
     if (!topic && enabled) {
       alert('Please enter a topic before enabling the extension.');
       enabledCheckbox.checked = false;
@@ -154,7 +146,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     const timerEndTime = enabled ? Date.now() + timer*60*1000 : null;
-    chrome.storage.sync.set({ enabled, timer, topic, apiKey, timerEndTime, isMonitoring: enabled }, () => {
+    chrome.storage.sync.set({ enabled, timer, topic, timerEndTime, isMonitoring: enabled }, () => {
       updateExtensionState(enabled, topic, timer);
       if(enabled){
         updateTimerDisplay();
@@ -167,6 +159,10 @@ document.addEventListener('DOMContentLoaded', () => {
         timerDisplay.textContent='00:00';
         chrome.alarms.clear('youtubeSuggestion');
       }
+  openSettingsBtn.addEventListener('click', () => {
+    if(chrome.runtime.openOptionsPage){ chrome.runtime.openOptionsPage(); }
+    else window.open(chrome.runtime.getURL('options.html'));
+  });
       // Trigger immediate content check (background uses stored key)
       chrome.runtime.sendMessage({ action: 'checkContent' });
       window.close();
