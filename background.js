@@ -8,10 +8,21 @@ let selectedTopic = '';
 let originalTimer = 0;
 let isCheckingConnection = false;
 let pendingCheck = null;
-
+let lastCheckedUrl = null; // For SPA change detection
+let spaUrlPollInterval = null;
+let timerTickInterval = null;
 // Caches (single instances)
 const comparisonCache = new Map();
 const classificationCache = new Map();
+
+function startTimerTick(){
+	if(timerTickInterval) return;
+	timerTickInterval=setInterval(async()=>{
+		const {timerEndTime}=await chrome.storage.sync.get('timerEndTime');
+		if(!timerEndTime){ clearInterval(timerTickInterval); timerTickInterval=null; return; }
+		chrome.runtime.sendMessage({action:'timerTick',now:Date.now(),timerEndTime});
+	},1000);
+}
 
 console.log('[SageMode] background script loaded');
 const TRUSTED_CHANNEL_PATTERNS=[ 'freecodecamp','khan','coursera','google developers','microsoft developer','mit opencourseware','stanford online','ibm technology','nvidia developer','tensorflow' ];
@@ -77,8 +88,8 @@ async function compare(pageCategory,pageTopic,userTopic){
 
 async function suggestVideo(topic){
 	if(!API_KEY) return null; const trusted=TRUSTED_CHANNEL_PATTERNS; const triedIds=new Set();
-	// Soft-fail statuses: treat as inconclusive (video may still load even if oEmbed blocked)
-	const SOFT_FAIL_STATUSES = new Set([401,403,404,429]);
+	// Soft-fail statuses (exclude 404 so we attempt replacement when truly missing)
+	const SOFT_FAIL_STATUSES = new Set([401,403,429]);
 	const debugLog = [];
 
 	// 1. Try structured JSON approach first for deterministic parsing
@@ -128,9 +139,8 @@ Example: {"video_url":"https://www.youtube.com/watch?v=abcdefghijk","channel":"f
 			triedIds.add(parsed.id);
 			const ver=await verify(parsed.url);
 			if(ver.ok){ console.log('[SageMode] video verified via oEmbed'); chrome.storage.local.set({suggestionDebug:debugLog}); return parsed.url; }
-			// Soft fail acceptance path
 			if(SOFT_FAIL_STATUSES.has(ver.status)){ console.warn('[SageMode] oEmbed soft-fail (accepting anyway):', ver.reason); chrome.storage.local.set({suggestionDebug:debugLog}); return parsed.url; }
-			console.warn('[SageMode] oEmbed hard reject:', ver.reason);
+			console.warn('[SageMode] oEmbed hard reject:', ver.reason,'status',ver.status);
 			if(!fallback){ fallback=parsed.url; fallbackMeta=ver.reason; }
 		} catch(e){ console.warn('[SageMode] suggestion attempt error', e.message); debugLog.push({attempt:a+1,error:e.message}); }
 	}
@@ -146,12 +156,31 @@ async function checkActiveTab(){
 		const [tab]=await chrome.tabs.query({active:true,currentWindow:true}); if(!tab) return; try { const u=new URL(tab.url); if(!/^https?:/.test(u.protocol)) return; } catch { return; }
 		if(!API_KEY){ chrome.action.setBadgeText({text:'KEY'}); chrome.action.setBadgeBackgroundColor({color:'#e67e22'}); return; }
 		const data=await extractStructured(tab.id);
+		lastCheckedUrl = tab.url;
 		if(!topic){ chrome.action.setBadgeText({text:''}); chrome.storage.local.set({currentState:{currentContent:data.title.slice(0,120),pageUrl:data.url,timestamp:new Date().toISOString(),tabId:tab.id}}); return; }
 		const urlKey=data.url.split('#')[0]; const cls=await classify(urlKey,data); const {isRelevant,confidence,reason}=await compare(cls.category,cls.topic,topic);
 		chrome.tabs.sendMessage(tab.id,{action:'updateHighlight',color:isRelevant?'#2ecc71':'#e74c3c',reason:reason||(isRelevant?'Relevant':'Not relevant')});
 		chrome.storage.local.set({ currentState:{ currentContent:data.title.slice(0,120), contentTopic:`${cls.category} - ${cls.topic}\n(${cls.audience})`, selectedTopic:topic, isRelevant, confidence, reason, timestamp:new Date().toISOString(), tabId:tab.id } });
-		if(isRelevant && confidence>=0.6){ chrome.action.setBadgeText({text:'✓'}); chrome.action.setBadgeBackgroundColor({color:'#2ecc71'}); chrome.alarms.clear('youtubeSuggestion'); chrome.storage.sync.set({timerEndTime:null}); chrome.storage.local.remove('nextVideoUrl'); }
-		else { chrome.action.setBadgeText({text:'!'}); chrome.action.setBadgeBackgroundColor({color:'#e74c3c'}); const {nextVideoUrl}=await chrome.storage.local.get('nextVideoUrl'); if(!nextVideoUrl){ const vid=await suggestVideo(topic); if(vid) chrome.storage.local.set({nextVideoUrl:vid}); } const {timerEndTime}=await chrome.storage.sync.get('timerEndTime'); if(!timerEndTime){ const {timer=5}=await chrome.storage.sync.get('timer'); chrome.alarms.create('youtubeSuggestion',{delayInMinutes:timer}); chrome.storage.sync.set({timerEndTime:Date.now()+timer*60000}); }}
+		if(isRelevant && confidence>=0.6){
+			chrome.action.setBadgeText({text:'✓'});
+			chrome.action.setBadgeBackgroundColor({color:'#2ecc71'});
+			chrome.alarms.clear('youtubeSuggestion');
+			chrome.storage.sync.set({timerEndTime:null,timerStartedAt:null,timerDurationMs:null});
+			chrome.storage.local.remove('nextVideoUrl');
+		}else{
+			chrome.action.setBadgeText({text:'!'});
+			chrome.action.setBadgeBackgroundColor({color:'#e74c3c'});
+			const {nextVideoUrl}=await chrome.storage.local.get('nextVideoUrl');
+			if(!nextVideoUrl){ const vid=await suggestVideo(topic); if(vid) chrome.storage.local.set({nextVideoUrl:vid}); }
+			const {timerEndTime}=await chrome.storage.sync.get('timerEndTime');
+			if(!timerEndTime){
+				const {timer=5}=await chrome.storage.sync.get('timer');
+				const endTime = Date.now()+timer*60000;
+				chrome.alarms.create('youtubeSuggestion',{when:endTime});
+				await chrome.storage.sync.set({timerEndTime:endTime,timerStartedAt:Date.now(),timerDurationMs:timer*60000});
+				startTimerTick();
+			}
+		}
 		chrome.runtime.sendMessage({action:'contentStateUpdate',state:{isRelevant,confidence,reason,pageTitle:data.title,pageUrl:data.url}});
 	} catch(e){ console.error('Check failed',e); chrome.action.setBadgeText({text:'x'}); chrome.action.setBadgeBackgroundColor({color:'#e74c3c'}); }
 }
@@ -191,8 +220,17 @@ chrome.runtime.onMessage.addListener((req,_s,sendResponse)=>{
 	if(req.action==='checkContent'){ scheduleCheck(); sendResponse({success:true}); return true; }
 });
 
-chrome.tabs.onUpdated.addListener((_id,info)=>{ if(info.status==='complete') scheduleCheck(); });
+chrome.tabs.onUpdated.addListener((tabId,info,tab)=>{ 
+	if(info.status==='complete'){
+		scheduleCheck();
+		// Second pass after 2.5s for SPA hydration or late content
+		setTimeout(()=>{ if(tab && tab.url===lastCheckedUrl) scheduleCheck(); },2500);
+	}
+});
 chrome.tabs.onActivated.addListener(()=> scheduleCheck());
+
+if(spaUrlPollInterval) clearInterval(spaUrlPollInterval);
+spaUrlPollInterval=setInterval(async()=>{ const {enabled,isMonitoring}=await chrome.storage.sync.get(['enabled','isMonitoring']); if(!enabled||!isMonitoring) return; const [tab]=await chrome.tabs.query({active:true,currentWindow:true}); if(!tab) return; if(tab.url!==lastCheckedUrl){ scheduleCheck(); } },5000);
 chrome.alarms.onAlarm.addListener(async alarm=>{
 	if(alarm.name!=='youtubeSuggestion') return;
 	try {
