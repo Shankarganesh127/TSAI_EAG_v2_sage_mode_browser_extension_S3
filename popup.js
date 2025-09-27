@@ -73,16 +73,23 @@ document.addEventListener('DOMContentLoaded', () => {
         statusText.textContent = 'Connected' + modelStr + latency;
         statusText.style.color = '#2ecc71';
       } else {
+        if(response?.error === 'Check in progress') {
+          // Soft retry shortly
+          console.log('Received in-progress state, retrying shortly...');
+          setTimeout(()=> checkConnection(retryCount+1), 400);
+          return;
+        }
         statusDot.className = 'status-dot error';
         let base = response?.error || 'Connection Error';
         if (response?.diagnostics) {
           const d = response.diagnostics;
-            const parts = [];
-            if (d.status) parts.push('HTTP '+d.status);
-            if (d.model) parts.push(d.model);
-            if (d.ms) parts.push(d.ms+'ms');
-            if (/invalid api key|permission/i.test(base)) parts.push('Check key / model access');
-            statusText.textContent = base + (parts.length? ' ['+parts.join(' | ')+']':'');
+          const parts = [];
+          if (d.aborted) parts.push('timeout');
+          if (d.status) parts.push('HTTP '+d.status);
+          if (d.model) parts.push(d.model);
+          if (d.ms) parts.push(d.ms+'ms');
+          if (/invalid api key|permission/i.test(base)) parts.push('Check key / model access');
+          statusText.textContent = base + (parts.length? ' ['+parts.join(' | ')+']':'');
         } else {
           statusText.textContent = base;
         }

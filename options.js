@@ -23,7 +23,12 @@ document.addEventListener('DOMContentLoaded', () => {
     if(!key){ setStatus('Please enter a key first.', 'err'); return; }
     chrome.storage.sync.set({ apiKey: key }, () => {
       setStatus('Key saved. You can test the connection.', 'ok');
-      chrome.runtime.sendMessage({ action:'checkGeminiConnection' }, resp => {
+      chrome.runtime.sendMessage({ action:'checkGeminiConnection' }, function handleResp(resp){
+        if(resp?.error === 'Check in progress') {
+          setStatus('Still checking...','');
+          setTimeout(()=> chrome.runtime.sendMessage({action:'checkGeminiConnection'}, handleResp), 400);
+          return;
+        }
         if(resp?.success) {
           const modelInfo = resp.model ? ` Model: ${resp.model}` : '';
           const latency = typeof resp.ms==='number'? ` (${resp.ms}ms)`:'';
@@ -46,8 +51,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   testBtn.addEventListener('click', () => {
     setStatus('Testing...', '');
-    chrome.runtime.sendMessage({ action:'checkGeminiConnection' }, resp => {
+    chrome.runtime.sendMessage({ action:'checkGeminiConnection' }, function handleResp(resp){
       if(chrome.runtime.lastError) { setStatus('Runtime error: '+chrome.runtime.lastError.message,'err'); return; }
+      if(resp?.error==='Check in progress') { setStatus('Checking...',''); setTimeout(()=> chrome.runtime.sendMessage({action:'checkGeminiConnection'}, handleResp),400); return; }
       if(resp?.success){
         const modelInfo = resp.model ? ` Model: ${resp.model}` : '';
         const latency = typeof resp.ms==='number'? ` (${resp.ms}ms)`:'';

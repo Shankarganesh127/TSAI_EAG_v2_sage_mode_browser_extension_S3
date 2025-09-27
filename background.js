@@ -107,20 +107,24 @@ chrome.runtime.onMessage.addListener((req,_s,sendResponse)=>{
 		if(isCheckingConnection){ sendResponse({success:modelConfigured,error:'Check in progress'}); return true; }
 		isCheckingConnection=true;
 		const started=Date.now();
-		GoogleGenerativeAI.generateContent(API_KEY,'ping').then(()=>{
+		const controller=new AbortController();
+		const timeout=setTimeout(()=>{ try { controller.abort(); } catch{} },6000);
+		GoogleGenerativeAI.generateContent(API_KEY,'ping',{signal:controller.signal}).then(()=>{
 			modelConfigured=true;
 			sendResponse({success:true,model:GoogleGenerativeAI.getCurrentModel(),ms:Date.now()-started});
 		}).catch(err=>{
 			modelConfigured=false;
+			const aborted = err?.name==='AbortError';
 			const diag={
-				message:err.message,
+				message:aborted? 'Connection timeout': err.message,
 				status:err.status,
 				model:GoogleGenerativeAI.getCurrentModel(),
 				ms:Date.now()-started,
-				rawSnippet: err.raw? JSON.stringify(err.raw).slice(0,180):undefined
+				rawSnippet: err.raw? JSON.stringify(err.raw).slice(0,180):undefined,
+				aborted
 			};
 			sendResponse({success:false,error:diag.message,diagnostics:diag});
-		}).finally(()=>{ isCheckingConnection=false; });
+		}).finally(()=>{ clearTimeout(timeout); isCheckingConnection=false; });
 		return true;
 	}
 	if(req.action==='setExtensionState'){
