@@ -137,29 +137,24 @@ document.addEventListener('DOMContentLoaded', () => {
     const enabled = enabledCheckbox.checked;
     const timer = parseInt(timerInput.value,10);
     const topic = topicInput.value.trim();
-    // API key handled in options page; allow enable but will show KEY badge until set
     if (!topic && enabled) {
       alert('Please enter a topic before enabling the extension.');
       enabledCheckbox.checked = false;
       return;
     }
-
-    const timerEndTime = enabled ? Date.now() + timer*60*1000 : null;
-    chrome.storage.sync.set({ enabled, timer, topic, timerEndTime, isMonitoring: enabled }, () => {
+    // Do NOT start timer yet; background starts when off-topic detected
+    chrome.storage.sync.set({ enabled, timer, topic, timerEndTime: null, isMonitoring: enabled }, () => {
       updateExtensionState(enabled, topic, timer);
       if(enabled){
-        updateTimerDisplay();
         if(timerInterval) clearInterval(timerInterval);
         timerInterval = setInterval(updateTimerDisplay,1000);
-        chrome.alarms.create('youtubeSuggestion', { delayInMinutes: timer });
         checkConnection();
+        chrome.runtime.sendMessage({ action: 'checkContent' });
       } else {
         if(timerInterval) { clearInterval(timerInterval); timerInterval=null; }
         timerDisplay.textContent='00:00';
         chrome.alarms.clear('youtubeSuggestion');
       }
-      // Trigger immediate content check (background uses stored key)
-      chrome.runtime.sendMessage({ action: 'checkContent' });
       window.close();
     });
   });
