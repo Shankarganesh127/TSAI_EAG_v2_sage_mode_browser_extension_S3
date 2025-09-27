@@ -14,6 +14,7 @@ let timerTickInterval = null;
 // Caches (single instances)
 const comparisonCache = new Map();
 const classificationCache = new Map();
+const rejectedVideoIds = new Set(); // persistent in-session to avoid repeating bad/unavailable videos
 
 function startTimerTick(){
 	if(timerTickInterval) return;
@@ -88,8 +89,8 @@ async function compare(pageCategory,pageTopic,userTopic){
 
 async function suggestVideo(topic){
 	if(!API_KEY) return null; const trusted=TRUSTED_CHANNEL_PATTERNS; const triedIds=new Set();
-	// Soft-fail statuses (exclude 404 so we attempt replacement when truly missing)
-	const SOFT_FAIL_STATUSES = new Set([401,403,429]);
+	// Only treat 429 (rate limit) as soft; 401/403 often means gated/unplayable -> reject
+	const SOFT_FAIL_STATUSES = new Set([429]);
 	const debugLog = [];
 
 	// Token utilities for title-topic relevance
@@ -123,22 +124,27 @@ Example: [{"video_url":"https://www.youtube.com/watch?v=abcdefghijk","channel":"
 			const url=c.video_url||c.url; const channel=(c.channel||'').toLowerCase();
 			if(!url||!/https:\/\/www\.youtube\.com\/watch\?v=[A-Za-z0-9_-]{11}$/.test(url)) { vetted.push({url,skip:true,reason:'bad_format'}); continue; }
 			if(!trusted.some(p=>channel.includes(p))){ vetted.push({url,skip:true,reason:'untrusted_channel'}); continue; }
+			const idMatch=url.match(/v=([A-Za-z0-9_-]{11})$/); const vid=idMatch? idMatch[1]:null; if(vid && rejectedVideoIds.has(vid)){ vetted.push({url,skip:true,reason:'rejected_before'}); continue; }
 			// oEmbed verify
 			try {
 				const v=await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(url)}`);
-				if(v.ok || SOFT_FAIL_STATUSES.has(v.status)){
+				if(v.ok){
 					let titleOk=true; let title='';
 					if(v.ok){ try { const meta=await v.json(); title=meta.title||''; titleOk=titleRelevant(title); } catch{} }
 					if(titleOk){ debugLog.push({phase:'json-candidate-accept',url,status:v.status,title}); chrome.storage.local.set({suggestionDebug:debugLog}); return url; }
 					debugLog.push({phase:'json-candidate-title-mismatch',url,status:v.status,title});
 					vetted.push({url,skip:false,reason:'title_mismatch'});
+				} else if(SOFT_FAIL_STATUSES.has(v.status)) {
+					debugLog.push({phase:'json-soft-skip',url,status:v.status});
+					vetted.push({url,skip:false,reason:'soft_status_'+v.status});
 				} else {
+					if(vid) rejectedVideoIds.add(vid);
 					vetted.push({url,skip:false,reason:'oembed_'+v.status});
 				}
 			} catch(e){ vetted.push({url,skip:false,reason:'oembed_error_'+e.message}); }
 		}
 		// fallback to first non-skipped vetted candidate (even if title mismatch) to avoid starvation
-		const fallbackCandidate = vetted.find(v=>!v.skip && v.url);
+		const fallbackCandidate = vetted.find(v=>!v.skip && v.url && !/oembed_404/.test(v.reason));
 		if(fallbackCandidate){ debugLog.push({phase:'json-fallback-candidate',candidate:fallbackCandidate}); chrome.storage.local.set({suggestionDebug:debugLog}); return fallbackCandidate.url; }
 	} catch(e){ debugLog.push({phase:'json-multi-failed',error:e.message}); }
 
@@ -167,8 +173,8 @@ Example: [{"video_url":"https://www.youtube.com/watch?v=abcdefghijk","channel":"
 			triedIds.add(parsed.id);
 			const ver=await verify(parsed.url);
 			if(ver.ok){ console.log('[SageMode] video verified via oEmbed+title'); debugLog.push({phase:'legacy-accept',title:ver.title}); chrome.storage.local.set({suggestionDebug:debugLog}); return parsed.url; }
-			if(SOFT_FAIL_STATUSES.has(ver.status)){ console.warn('[SageMode] oEmbed soft-fail (accepting anyway):', ver.reason); chrome.storage.local.set({suggestionDebug:debugLog}); return parsed.url; }
-			console.warn('[SageMode] oEmbed hard reject:', ver.reason,'status',ver.status);
+			console.warn('[SageMode] legacy reject:', ver.reason,'status',ver.status);
+			const idm=parsed.url.match(/v=([A-Za-z0-9_-]{11})$/); if(idm) rejectedVideoIds.add(idm[1]);
 			if(!fallback){ fallback=parsed.url; fallbackMeta=ver.reason; }
 		} catch(e){ console.warn('[SageMode] suggestion attempt error', e.message); debugLog.push({attempt:a+1,error:e.message}); }
 	}
@@ -264,6 +270,24 @@ chrome.alarms.onAlarm.addListener(async alarm=>{
 	try {
 		const {enabled,topic}=await chrome.storage.sync.get(['enabled','topic']);
 		if(!enabled||!topic){ return; }
+		// Final relevance gate: re-classify active tab; abort if now relevant
+		try {
+			const [tab]=await chrome.tabs.query({active:true,currentWindow:true});
+			if(tab && /^https?:/.test(tab.url)){
+				const data=await extractStructured(tab.id).catch(()=>null);
+				if(data){
+					const urlKey=data.url.split('#')[0];
+					const cls=await classify(urlKey,data);
+					const cmp=await compare(cls.category,cls.topic,topic);
+					if(cmp.isRelevant && cmp.confidence>=0.6){
+						console.log('[SageMode] Abort opening video: page became relevant.');
+						chrome.alarms.clear('youtubeSuggestion');
+						chrome.storage.sync.set({timerEndTime:null,timerStartedAt:null,timerDurationMs:null});
+						return;
+					}
+				}
+			}
+		} catch(reGateErr){ console.warn('[SageMode] relevance re-gate failed (continuing):', reGateErr.message); }
 		let {nextVideoUrl}=await chrome.storage.local.get('nextVideoUrl');
 		// If we somehow lost the stored URL, attempt to fetch one now before giving up
 		if(!nextVideoUrl){
