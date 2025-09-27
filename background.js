@@ -1,571 +1,177 @@
 import { GoogleGenerativeAI } from './lib/gemini.js';
 
-const GEMINI_API_KEY = 'AIzaSyBe4P7dmOiBy6gE9Yys4kk0CHf8r04EC0Q';
+// Clean reimplementation after refactor corruption
+let API_KEY = null;
 let modelConfigured = false;
-let suggestedVideos = new Set(); // Store suggested video URLs
-let lastRequestTime = 0; // Track the last API request time
-let isExtensionEnabled = false; // Track extension state
-let selectedTopic = ''; // Store the currently selected topic
-let originalTimer = 0; // Store the original timer value
+let isExtensionEnabled = false;
+let selectedTopic = '';
+let originalTimer = 0;
+let isCheckingConnection = false;
+let pendingCheck = null;
+const comparisonCache = new Map();
+const classificationCache = new Map();
 
-// Initialize Gemini API connection
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action === 'checkGeminiConnection') {
-    console.log('🔄 Checking Gemini API connection...');
-    
-    // Use the Gemini SDK to test connection
-    GoogleGenerativeAI.generateContent(GEMINI_API_KEY, 'test')
-      .then(async () => {
-        modelConfigured = true;
-        console.log('✅ Connected to Gemini API');
-        sendResponse({ success: true });
-      })
-      .catch(error => {
-        console.error('❌ API connection failed:', error);
-        sendResponse({ success: false, error: error.message });
-      });
-    return true;  // Will respond asynchronously
+const TRUSTED_CHANNEL_PATTERNS = [
+  'freecodecamp','khan','coursera','google developers','microsoft developer',
+  'mit opencourseware','stanford online','ibm technology','nvidia developer','tensorflow'
+];
+
+chrome.storage.sync.get(['apiKey'], r => { API_KEY = r.apiKey ? r.apiKey.trim() : null; });
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'sync' && changes.apiKey) {
+    API_KEY = changes.apiKey.newValue ? changes.apiKey.newValue.trim() : null;
+    modelConfigured = false;
   }
 });
 
-async function getYouTubeVideoSuggestion(topic) {
-  try {
-    console.log('🎥 Getting video suggestion for topic:', topic);
+function requireKey() { if (!API_KEY) throw new Error('Missing API key'); }
+async function gem(prompt){ requireKey(); return await GoogleGenerativeAI.generateContent(API_KEY, prompt); }
 
-    const prompt = `Suggest a popular, currently available educational YouTube video about "${topic}".
-Consider these STRICT requirements:
-1. Must be from one of these channels ONLY:
-   - freeCodeCamp.org
-   - Coursera
-   - Khan Academy
-   - Microsoft Developer
-   - Google Developers
-   - MIT OpenCourseWare
-   - Stanford Online
-2. Must be a recent video (2023 or newer)
-3. Must be from the channel's main playlist or featured content
-4. Must be a complete, standalone lesson (not a preview or trailer)
-
-Format your response exactly like this:
-VIDEO_TITLE: [exact title as shown on YouTube]
-VIDEO_URL: [complete YouTube URL, must be from a major channel]
-REASON: [briefly explain why this is a reliable source]`;
-
-    // Make the API call to Gemini
-    const response = await GoogleGenerativeAI.generateContent(GEMINI_API_KEY, prompt);
-    
-    // Log full response for debugging
-    console.log('Raw Gemini response:', response);
-
-    // Simple URL extraction
-    const response_text = response.text ? response.text : response;
-    const urlMatch = response_text.match(/VIDEO_URL:\s*(https:\/\/(?:www\.)?youtube\.com\/[^\s]+)/i);
-    
-    if (!urlMatch) {
-      throw new Error('No valid YouTube URL found in response');
-    }
-    
-    // Clean and validate the URL
-    let extractedUrl = urlMatch[1].trim();
-    
-    // Remove any trailing punctuation or special characters
-    if (extractedUrl.endsWith('.') || extractedUrl.endsWith(',') || extractedUrl.endsWith('"') || extractedUrl.endsWith("'")) {
-      extractedUrl = extractedUrl.slice(0, -1);
-    }
-    
-    // Additional validation for watch URL format
-    if (!extractedUrl.includes('youtube.com/watch?v=')) {
-      throw new Error('Invalid YouTube video URL format');
-    }
-
-    return extractedUrl;
-
-    return url;
-  } catch (error) {
-    console.error('❌ Error getting video suggestion:', error);
-    return null;
-  }
+function scheduleCheck(){
+  if(!isExtensionEnabled || !selectedTopic) return;
+  if(pendingCheck) clearTimeout(pendingCheck);
+  pendingCheck = setTimeout(()=>{ pendingCheck=null; checkActiveTab(); },350);
 }
 
-async function extractPageContent(tabId) {
-  try {
-    // Get tab information
-    const tab = await chrome.tabs.get(tabId);
-    if (!tab.url) throw new Error('No URL available');
-
-    // Only process http/https URLs
-    if (!tab.url.startsWith('http')) {
-      return ['System', 'Browser Page', ''];
-    }
-
-    // For YouTube URLs, extract info from URL and title
-    if (tab.url.includes('youtube.com')) {
-      const videoId = tab.url.match(/[?&]v=([^&]+)/)?.[1] || '';
-      return ['Video', 'YouTube Content', tab.title || ''];
-    }
-
-    // For other pages, use the title and URL for basic analysis
-    const analyzePrompt = `Analyze this webpage title and URL to determine its likely category and topic:
-
-Title: ${tab.title || 'Untitled'}
-URL: ${tab.url}
-
-Response format:
-CATEGORY: [broad category like Technology, Science, History, etc.]
-TOPIC: [specific topic within category]`;
-
-    const analysis = await GoogleGenerativeAI.generateContent(GEMINI_API_KEY, analyzePrompt);
-    const categoryMatch = analysis.match(/CATEGORY:\s*([^\n]+)/i);
-    const topicMatch = analysis.match(/TOPIC:\s*([^\n]+)/i);
-
-    return [
-      categoryMatch ? categoryMatch[1].trim() : 'Unknown',
-      topicMatch ? topicMatch[1].trim() : 'Unknown',
-      tab.title || ''
-    ];
-  } catch (error) {
-    console.error('❌ Error extracting page content:', error);
-    return ['Unknown', 'Unknown', ''];
-  }
-}
-
-async function compareTopics(pageCategory, pageTopic, selectedTopic) {
-  try {
-    const comparePrompt = `Compare these topics:
-
-Page Category: ${pageCategory}
-Page Topic: ${pageTopic}
-User's Selected Topic: ${selectedTopic}
-
-Consider:
-1. Direct matches (same topic/category)
-2. Related topics within same category
-3. Subtopics or broader topics that encompass each other
-4. Semantic similarity and relevance
-
-Response format:
-MATCH: [yes/no]
-CONFIDENCE: [0-100]
-REASON: [brief explanation]`;
-    
-    const result = await GoogleGenerativeAI.generateContent(GEMINI_API_KEY, comparePrompt);
-    const matchMatch = result.match(/MATCH:\s*(yes|no)/i);
-    const confidenceMatch = result.match(/CONFIDENCE:\s*(\d+)/i);
-    const reasonMatch = result.match(/REASON:\s*([^\n]+)/i);
-
-    if (!matchMatch || !confidenceMatch) {
-      throw new Error('Invalid comparison result format');
-    }
-
-    const isRelevant = matchMatch[1].toLowerCase() === 'yes';
-    const confidence = parseInt(confidenceMatch[1], 10) / 100;
-    const reason = reasonMatch ? reasonMatch[1].trim() : '';
-
-    console.log('🎯 Topic comparison result:', { isRelevant, confidence, reason });
-    return { isRelevant, confidence, reason };
-  } catch (error) {
-    console.error('❌ Topic comparison error:', error);
-    return { isRelevant: false, confidence: 0, reason: 'Error comparing topics' };
-  }
-}
-
-// Listen for new tab creation and updates
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (!isExtensionEnabled || !selectedTopic) return;
-  
-  // Only check when the tab has finished loading
-  if (changeInfo.status === 'complete') {
-    console.log('📄 New tab loaded:', tabId);
-    checkNewTabContent(tabId);
-  }
-});
-
-// Handle extension enable/disable
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action === 'setExtensionState') {
-    isExtensionEnabled = request.enabled;
-    selectedTopic = request.topic || '';
-    originalTimer = request.timer || 0;
-    console.log(`Extension ${isExtensionEnabled ? 'enabled' : 'disabled'} for topic: ${selectedTopic}`);
-    
-    // Clear any existing timer when extension state changes
-    chrome.alarms.clear('contentCheck');
-    
-    sendResponse({ success: true });
-  }
-});
-
-// Handle timer expiration
-chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name === 'contentCheck') {
-    try {
-      // Get the stored tab ID
-      const { timerTabId } = await chrome.storage.local.get('timerTabId');
-      if (!timerTabId) {
-        console.log('❌ No tab ID stored for timer');
-        return;
-      }
-
-      console.log('⏰ Timer expired for tab:', timerTabId);
-      
-      // Get a new video suggestion
-      const videoUrl = await getYouTubeVideoSuggestion(selectedTopic);
-      if (videoUrl) {
-        console.log('✅ Got valid video URL:', videoUrl);
-        
-        // Create new tab with suggested video
-        const newTab = await chrome.tabs.create({ url: videoUrl });
-        console.log('✅ Created new tab:', newTab.id);
-        
-        // Close the non-relevant tab after a short delay
-        setTimeout(async () => {
-          try {
-            await chrome.tabs.remove(timerTabId);
-            console.log('✅ Closed non-relevant tab:', timerTabId);
-          } catch (removeError) {
-            console.error('❌ Error closing tab:', removeError);
-          }
-        }, 500);
-      }
-    } catch (error) {
-      console.error('❌ Error handling timer expiration:', error);
-    }
-  }
-});
-
-async function checkNewTabContent(tabId) {
-  try {
-    console.log('🔄 Checking New Tab Content');
-    
-    // Get the tab content
-    const tab = await chrome.tabs.get(tabId);
-    if (!tab || !tab.url || tab.url.startsWith('chrome://')) return;
-
-    // Extract content from the tab
-    const [category, topic, content] = await extractPageContent(tab.id);
-    
-    // Compare with selected topic
-    const { isRelevant, confidence } = await compareTopics(category, topic, selectedTopic);
-    
-    // Update highlight color based on relevance
-    await chrome.tabs.sendMessage(tab.id, {
-      action: 'updateHighlight',
-      color: isRelevant ? 'green' : 'red'
+async function extractStructured(tabId){
+  return new Promise((res,rej)=>{
+    chrome.tabs.sendMessage(tabId,{action:'extractStructuredContent'},resp=>{
+      if(chrome.runtime.lastError) return rej(new Error(chrome.runtime.lastError.message));
+      if(!resp||!resp.success) return rej(new Error(resp?.error||'Extraction failed'));
+      res(resp.data);
     });
-
-    // Clear any existing timer
-    await chrome.alarms.clear('contentCheck');
-
-    if (isRelevant) {
-      console.log('✅ Content is relevant - No timer needed');
-      // Remove any stored tab ID since content is relevant
-      await chrome.storage.local.remove('timerTabId');
-    } else {
-      if (originalTimer > 0) {
-        // Store the current tab id for the alarm handler
-        await chrome.storage.local.set({ 'timerTabId': tab.id });
-        
-        // Start timer for non-relevant content
-        await chrome.alarms.create('contentCheck', { delayInMinutes: originalTimer });
-        console.log('⏰ Started timer for non-relevant content:', originalTimer, 'minutes');
-      }
-    }
-  } catch (error) {
-    console.error('❌ Error checking new tab content:', error);
-  }
-      } catch (videoError) {
-        console.error('❌ Error in video suggestion process:', videoError);
-      }
-    }
-  } catch (error) {
-    console.error('❌ Error checking new tab content:', error);
-  }
+  });
 }
 
-async function checkActiveTabContent() {
+async function classify(urlKey, data){
+  if(classificationCache.has(urlKey)) return classificationCache.get(urlKey);
   try {
-    console.log('🔄 Starting Active Tab Content Check');
-    
-    // Implement rate limiting
-    const now = Date.now();
-    if (now - lastRequestTime < 1000) {
-      console.log('⏳ Rate limiting: Waiting for 1-second cooldown...');
-      return;
+    const prompt = `Classify page.
+CATEGORY: <broad>
+TOPIC: <specific>
+AUDIENCE: <audience>
+Title:${data.title}
+Desc:${data.description||'N/A'}
+Headers:${(data.headers.h1||[]).slice(0,3).join('; ')}
+Body:${data.body.slice(0,300)}
+`;
+    const t = await gem(prompt);
+    const category = (t.match(/CATEGORY:\s*([^\n]+)/i)||[, 'Unknown'])[1].trim();
+    const topic = (t.match(/TOPIC:\s*([^\n]+)/i)||[, 'Unknown'])[1].trim();
+    const audience = (t.match(/AUDIENCE:\s*([^\n]+)/i)||[, 'Unknown'])[1].trim();
+    const result = { category, topic, audience };
+    classificationCache.set(urlKey,result);
+    return result;
+  } catch { return { category:'Unknown', topic:'Unknown', audience:'Unknown' }; }
+}
+
+async function compare(pageCategory,pageTopic,userTopic){
+  const key=`${pageCategory}|${pageTopic}|${userTopic}`.toLowerCase();
+  if(comparisonCache.has(key)) return comparisonCache.get(key);
+  try {
+    const prompt = `Relation?
+PAGE_CATEGORY:${pageCategory}
+PAGE_TOPIC:${pageTopic}
+USER_TOPIC:${userTopic}
+MATCH: yes/no
+CONFIDENCE: 0-100
+REASON: <short>`;
+    const t = await gem(prompt);
+    const isRelevant = /MATCH:\s*yes/i.test(t);
+    const c = t.match(/CONFIDENCE:\s*(\d{1,3})/i); const confidence = c? Math.min(100,parseInt(c[1],10))/100:0;
+    const reason = (t.match(/REASON:\s*([^\n]+)/i)||[, ''])[1].trim();
+    const result = { isRelevant, confidence, reason };
+    comparisonCache.set(key,result);
+    return result;
+  } catch { return { isRelevant:false, confidence:0, reason:'Comparison failed'}; }
+}
+
+async function suggestVideo(topic){
+  if(!API_KEY) return null;
+  try {
+    const prompt = `One educational YouTube video.
+Topic:${topic}
+Channels: freeCodeCamp, Khan Academy, Coursera, Google Developers, Microsoft Developer, MIT OpenCourseWare, Stanford Online, IBM Technology, NVIDIA Developer, TensorFlow
+Year>=2023
+FORMAT:
+VIDEO_URL: https://www.youtube.com/watch?v=...\nCHANNEL: <name>`;
+    const t = await gem(prompt);
+    const urlMatch = t.match(/VIDEO_URL:\s*(https:\/\/www\.youtube\.com\/watch\?v=[^\s]+)/i);
+    if(!urlMatch) throw new Error('No URL');
+    const chMatch = t.match(/CHANNEL:\s*([^\n]+)/i);
+    const ch = chMatch? chMatch[1].toLowerCase():'';
+    if(!TRUSTED_CHANNEL_PATTERNS.some(p=>ch.includes(p))) throw new Error('Untrusted channel');
+    return urlMatch[1].trim();
+  } catch { return null; }
+}
+
+async function checkActiveTab(){
+  try {
+    const { enabled, topic, isMonitoring } = await chrome.storage.sync.get(['enabled','topic','isMonitoring']);
+    if(!enabled || !topic || !isMonitoring){ chrome.action.setBadgeText({ text:''}); return; }
+    const [tab] = await chrome.tabs.query({ active:true, currentWindow:true });
+    if(!tab) return;
+    try { const u=new URL(tab.url); if(!/^https?:/.test(u.protocol)) return; } catch { return; }
+    if(!API_KEY){ chrome.action.setBadgeText({ text:'KEY'}); chrome.action.setBadgeBackgroundColor({ color:'#e67e22'}); return; }
+    const data = await extractStructured(tab.id);
+    const urlKey = data.url.split('#')[0];
+    const cls = await classify(urlKey,data);
+    const { isRelevant, confidence, reason } = await compare(cls.category, cls.topic, topic);
+    chrome.tabs.sendMessage(tab.id,{ action:'updateHighlight', color: isRelevant? '#2ecc71':'#e74c3c', reason: reason|| (isRelevant?'Relevant':'Not relevant') });
+    const state = { currentContent: data.title.slice(0,120), contentTopic:`${cls.category} - ${cls.topic}\n(${cls.audience})`, selectedTopic:topic, isRelevant, confidence, reason, timestamp:new Date().toISOString(), tabId:tab.id };
+    chrome.storage.local.set({ currentState: state });
+    if(isRelevant && confidence>=0.6){
+      chrome.action.setBadgeText({ text:'✓'}); chrome.action.setBadgeBackgroundColor({ color:'#2ecc71'});
+      chrome.alarms.clear('youtubeSuggestion'); chrome.storage.sync.set({ timerEndTime:null }); chrome.storage.local.remove('nextVideoUrl');
+    } else {
+      chrome.action.setBadgeText({ text:'!'}); chrome.action.setBadgeBackgroundColor({ color:'#e74c3c'});
+      const { nextVideoUrl } = await chrome.storage.local.get('nextVideoUrl');
+      if(!nextVideoUrl){ const vid = await suggestVideo(topic); if(vid) chrome.storage.local.set({ nextVideoUrl: vid }); }
+      const { timerEndTime } = await chrome.storage.sync.get('timerEndTime');
+      if(!timerEndTime){ const { timer=5 } = await chrome.storage.sync.get('timer'); chrome.alarms.create('youtubeSuggestion',{ delayInMinutes: timer }); chrome.storage.sync.set({ timerEndTime: Date.now()+timer*60*1000 }); }
     }
-    
-    const { enabled, topic, isMonitoring } = await chrome.storage.sync.get(['enabled', 'topic', 'isMonitoring']);
-    if (!enabled || !topic || !isMonitoring) {
-      console.log('⏸️ Extension state:', { enabled, topic, isMonitoring });
-      await chrome.action.setBadgeText({ text: '' });
-      return;
-    }
-    
-    // Update last request time
-    lastRequestTime = now;
-
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab) {
-      console.log('⚠️ No active tab found');
-      await chrome.action.setBadgeText({ text: '?' });
-      await chrome.action.setBadgeBackgroundColor({ color: '#95a5a6' });
-      return;
-    }
-
-    // Handle restricted URLs
-    try {
-      const url = new URL(tab.url);
-      const restrictedProtocols = ['chrome:', 'chrome-extension:', 'edge:', 'about:', 'file:', 'chrome-search:'];
-      if (restrictedProtocols.some(protocol => url.protocol.startsWith(protocol))) {
-        console.log('⏭️ Skipping restricted page:', url.protocol);
-        await chrome.action.setBadgeText({ text: '-' });
-        await chrome.action.setBadgeBackgroundColor({ color: '#95a5a6' });
-        return;
-      }
-    } catch (error) {
-      console.log('⚠️ Invalid or restricted URL');
-      await chrome.action.setBadgeText({ text: '-' });
-      await chrome.action.setBadgeBackgroundColor({ color: '#95a5a6' });
-      return;
-    }
-
-    // Extract page content
-    try {
-      const content = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        function: () => {
-          const getMetaContent = (name) => {
-            const meta = document.querySelector(`meta[name="${name}"], meta[property="${name}"]`);
-            return meta ? meta.getAttribute('content') : '';
-          };
-
-          // Extract meaningful content
-          const extractText = (node) => {
-            if (!node) return '';
-            if (node.nodeType === Node.TEXT_NODE) return node.textContent;
-            if (node.nodeType !== Node.ELEMENT_NODE) return '';
-            if (['SCRIPT', 'STYLE', 'NOSCRIPT', 'IFRAME', 'NAV', 'FOOTER'].includes(node.tagName)) return '';
-            
-            // Special handling for headers
-            if (['H1', 'H2', 'H3'].includes(node.tagName)) {
-              return `[${node.tagName}] ${node.textContent.trim()} [/${node.tagName}]\n`;
-            }
-            
-            return Array.from(node.childNodes).map(extractText).join(' ');
-          };
-
-          // Get all headers first
-          const h1s = Array.from(document.querySelectorAll('h1')).map(h => `[H1] ${h.textContent.trim()} [/H1]`);
-          const h2s = Array.from(document.querySelectorAll('h2')).map(h => `[H2] ${h.textContent.trim()} [/H2]`);
-          const h3s = Array.from(document.querySelectorAll('h3')).map(h => `[H3] ${h.textContent.trim()} [/H3]`);
-          
-          // Get main content
-          const mainContent = document.querySelector('main') || document.querySelector('article') || document.body;
-          const bodyText = extractText(mainContent).replace(/\s+/g, ' ').trim();
-          
-          // Get metadata
-          const description = getMetaContent('description') || getMetaContent('og:description');
-          const keywords = getMetaContent('keywords');
-          const title = document.title;
-
-          // Combine all content with clear section markers
-          return `
-PAGE TITLE: ${title}
-
-HEADERS HIERARCHY:
-${h1s.join('\n')}
-${h2s.join('\n')}
-${h3s.join('\n')}
-
-META DESCRIPTION:
-${description}
-
-KEYWORDS:
-${keywords}
-
-MAIN CONTENT:
-${bodyText}
-`.trim();
-        }
-      });
-
-      if (!content || !content[0]?.result) {
-        throw new Error('No content found on page');
-      }
-
-      const pageText = content[0].result;
-      if (!pageText.trim()) {
-        throw new Error('Empty page content');
-      }
-
-      console.log('📝 Retrieved page content:', pageText.slice(0, 100) + '...');
-
-      // Extract page topic from Gemini response
-      const topicPrompt = `Based on this webpage content, determine:
-1. The main topic category
-2. The specific subject matter
-3. The target audience and content level
-
-Format your response exactly like this:
-CATEGORY: [Main category like Technology, Science, Business, etc.]
-TOPIC: [Specific subject matter]
-AUDIENCE: [Target audience and level]
-
-Content to analyze:
-${pageText.substring(0, 1500)}...`;
-
-      const topicAnalysis = await GoogleGenerativeAI.generateContent(GEMINI_API_KEY, topicPrompt);
-      
-      // Extract category and topic
-      const categoryMatch = topicAnalysis.match(/CATEGORY:\s*([^\n]+)/);
-      const topicMatch = topicAnalysis.match(/TOPIC:\s*([^\n]+)/);
-      const audienceMatch = topicAnalysis.match(/AUDIENCE:\s*([^\n]+)/);
-
-      const pageCategory = categoryMatch ? categoryMatch[1].trim() : 'Unknown';
-      const pageTopic = topicMatch ? topicMatch[1].trim() : 'Unknown';
-      const pageAudience = audienceMatch ? audienceMatch[1].trim() : 'Unknown';
-
-      // Compare topics using the new comparison function
-      const { isRelevant, confidence, reason } = await compareTopics(pageCategory, pageTopic, topic);
-
-      // Save current state for UI
-      const currentState = {
-        currentContent: pageText.substring(0, 100) + "...",
-        contentTopic: `${pageCategory} - ${pageTopic}\n(${pageAudience})`,
-        selectedTopic: topic,
-        isRelevant,
-        confidence,
-        reason,
-        timestamp: new Date().toISOString(),
-        tabId: tab.id
-      };
-
-      console.log('💾 Saving Current State:', currentState);
-      await chrome.storage.local.set({ currentState });
-
-      if (isRelevant && confidence >= 0.7) {
-        console.log('✅ Content is relevant to topic');
-        await chrome.action.setBadgeText({ text: '✓' });
-        await chrome.action.setBadgeBackgroundColor({ color: '#2ecc71' });
-        
-        // Clear any existing timer and video suggestion
-        chrome.alarms.clear('youtubeSuggestion');
-        await chrome.storage.sync.set({ timerEndTime: null });
-        await chrome.storage.local.remove('nextVideoUrl');
-      } else {
-        console.log('⚠️ Content not relevant, preparing video suggestion');
-        await chrome.action.setBadgeText({ text: '!' });
-        await chrome.action.setBadgeBackgroundColor({ color: '#e74c3c' });
-
-        // Get a video suggestion if we don't have one
-        const { nextVideoUrl } = await chrome.storage.local.get('nextVideoUrl');
-        if (!nextVideoUrl) {
-          const videoUrl = await getYouTubeVideoSuggestion(topic);
-          if (videoUrl) {
-            await chrome.storage.local.set({ nextVideoUrl: videoUrl });
-          }
-        }
-
-        // Start/update timer if not already running
-        const { timerEndTime } = await chrome.storage.sync.get('timerEndTime');
-        if (!timerEndTime) {
-          const { timer = 5 } = await chrome.storage.sync.get('timer');
-          chrome.alarms.create('youtubeSuggestion', { delayInMinutes: timer });
-          await chrome.storage.sync.set({ timerEndTime: Date.now() + timer * 60 * 1000 });
-        }
-      }
-
-      // Broadcast state update
-      chrome.runtime.sendMessage({ 
-        action: 'contentStateUpdate', 
-        state: { 
-          isRelevant, 
-          confidence,
-          reason,
-          pageTitle: tab.title,
-          pageUrl: tab.url
-        }
-      });
-
-    } catch (error) {
-      console.error('❌ Error processing page:', error);
-      await chrome.action.setBadgeText({ text: 'x' });
-      await chrome.action.setBadgeBackgroundColor({ color: '#e74c3c' });
-    }
-  } catch (error) {
-    console.error('❌ Error checking active tab content:', error);
+    chrome.runtime.sendMessage({ action:'contentStateUpdate', state:{ isRelevant, confidence, reason, pageTitle:data.title, pageUrl:data.url } });
+  } catch (e) {
+    console.error('Check failed', e);
+    chrome.action.setBadgeText({ text:'x'}); chrome.action.setBadgeBackgroundColor({ color:'#e74c3c'});
   }
 }
 
-// Set up tab-based monitoring
-function startMonitoring() {
-  // Only check on tab changes now, no interval needed
-  checkActiveTabContent();
-}
+// Messages
+chrome.runtime.onMessage.addListener((req, _sender, sendResponse)=>{
+  if(req.action==='checkGeminiConnection'){
+    if(!API_KEY){ sendResponse({ success:false, error:'Missing API key'}); return true; }
+    if(isCheckingConnection){ sendResponse({ success: modelConfigured, error:'Check in progress'}); return true; }
+    isCheckingConnection=true;
+    GoogleGenerativeAI.generateContent(API_KEY,'ping').then(()=>{ modelConfigured=true; sendResponse({ success:true }); }).catch(err=>{ modelConfigured=false; sendResponse({ success:false, error: err.message }); }).finally(()=>{ isCheckingConnection=false; });
+    return true;
+  }
+  if(req.action==='setExtensionState'){
+    isExtensionEnabled = req.enabled; selectedTopic = req.topic||''; originalTimer = req.timer||0; chrome.alarms.clear('contentCheck'); sendResponse({ success:true }); return true; }
+});
 
-function stopMonitoring() {
-  // No need to clear anything since we're not using intervals
-  console.log('Monitoring stopped');
-}
+// Events
+chrome.tabs.onUpdated.addListener((_id, changeInfo)=>{ if(changeInfo.status==='complete') scheduleCheck(); });
+chrome.tabs.onActivated.addListener(()=> scheduleCheck());
+chrome.alarms.onAlarm.addListener(async alarm=>{
+  if(alarm.name==='youtubeSuggestion'){
+    const { nextVideoUrl } = await chrome.storage.local.get('nextVideoUrl');
+    const { enabled, topic } = await chrome.storage.sync.get(['enabled','topic']);
+    if(enabled && topic && nextVideoUrl){
+      const [currentTab] = await chrome.tabs.query({ active:true, currentWindow:true });
+      await chrome.tabs.create({ url: nextVideoUrl });
+      if(currentTab) chrome.tabs.remove(currentTab.id).catch(()=>{});
+      chrome.storage.local.remove('nextVideoUrl');
+      chrome.storage.sync.remove('timerEndTime');
+    }
+  }
+});
 
-// Initialize when the extension loads
-chrome.runtime.onInstalled.addListener(() => {
-  console.log('🚀 Extension installed/updated');
-  chrome.storage.sync.get(['enabled', 'topic', 'timer'], (result) => {
-    if (result.enabled === undefined) {
-      chrome.storage.sync.set({ enabled: false });
-    }
-    if (result.timer === undefined) {
-      chrome.storage.sync.set({ timer: 5 }); // Default 5 minutes
-    }
+chrome.runtime.onInstalled.addListener(()=>{
+  chrome.storage.sync.get(['enabled','timer'], r=>{
+    if(r.enabled===undefined) chrome.storage.sync.set({ enabled:false });
+    if(r.timer===undefined) chrome.storage.sync.set({ timer:5 });
   });
 });
 
-// Listen for changes in monitoring state
-chrome.storage.onChanged.addListener((changes) => {
-  if (changes.isMonitoring) {
-    if (changes.isMonitoring.newValue) {
-      startMonitoring();
-    } else {
-      stopMonitoring();
-    }
-  }
-});
-
-// Listen for tab updates
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === 'complete') {
-    checkActiveTabContent();
-  }
-});
-
-// Listen for tab activation
-chrome.tabs.onActivated.addListener(() => {
-  checkActiveTabContent();
-});
-
-// Listen for alarms
-chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name === 'youtubeSuggestion') {
-    const { nextVideoUrl } = await chrome.storage.local.get('nextVideoUrl');
-    const { enabled, topic } = await chrome.storage.sync.get(['enabled', 'topic']);
-    
-    if (enabled && topic && nextVideoUrl) {
-      // Get the current tab ID before opening the new one
-      const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      
-      // Open the video in a new tab
-      await chrome.tabs.create({ url: nextVideoUrl });
-      
-      // Close the previous tab
-      if (currentTab) {
-        await chrome.tabs.remove(currentTab.id);
-      }
-      
-      // Clear the stored video URL
-      await chrome.storage.local.remove('nextVideoUrl');
-      
-      // Reset timer end time
-      await chrome.storage.sync.remove('timerEndTime');
-    }
-  }
-});
+export {}; // MV3 module terminator

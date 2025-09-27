@@ -2,6 +2,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const enabledCheckbox = document.getElementById('enabled');
   const timerInput = document.getElementById('timer');
   const topicInput = document.getElementById('topic');
+  const apiKeyInput = document.getElementById('api-key');
   const saveButton = document.getElementById('save');
   const timerDisplay = document.getElementById('timer-display');
   const statusDot = document.getElementById('status-indicator');
@@ -45,6 +46,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Check Gemini API connection with timeout and retry
   function checkConnection(retryCount = 0) {
+    const keyVal = apiKeyInput.value.trim();
+    if(!keyVal){
+      statusDot.className = 'status-dot error';
+      statusText.textContent = 'Missing API Key';
+      statusText.style.color = '#e74c3c';
+      return; // don't attempt connection without key
+    }
     const connectionTimeout = setTimeout(() => {
       if (retryCount < 2) {
         console.log(`Connection timeout, retrying (${retryCount + 1}/2)...`);
@@ -99,13 +107,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Load saved settings
   function loadSettings() {
-    chrome.storage.sync.get(['enabled', 'timer', 'topic'], (settings) => {
+    chrome.storage.sync.get(['enabled', 'timer', 'topic', 'apiKey'], (settings) => {
       enabledCheckbox.checked = settings.enabled || false;
       timerInput.value = settings.timer || 5;
       topicInput.value = settings.topic || '';
+      apiKeyInput.value = settings.apiKey || '';
       
       // Update extension state in background
       updateExtensionState(settings.enabled, settings.topic, settings.timer);
+      // attempt connection if key present
+      if(settings.apiKey) checkConnection();
     });
   }
 
@@ -128,36 +139,37 @@ document.addEventListener('DOMContentLoaded', () => {
   // Save settings with extension state update
   saveButton.addEventListener('click', () => {
     const enabled = enabledCheckbox.checked;
-    const timer = parseInt(timerInput.value);
+    const timer = parseInt(timerInput.value,10);
     const topic = topicInput.value.trim();
+    const apiKey = apiKeyInput.value.trim();
 
+    if(!apiKey){
+      alert('Please enter your Gemini API key.');
+      return;
+    }
     if (!topic && enabled) {
       alert('Please enter a topic before enabling the extension.');
       enabledCheckbox.checked = false;
       return;
     }
 
-    chrome.storage.sync.set({
-      enabled: enabled,
-      timer: timer,
-      topic: topic,
-      timerEndTime: enabled ? Date.now() + (timer * 60 * 1000) : null
-    }, () => {
-      // Update extension state
+    const timerEndTime = enabled ? Date.now() + timer*60*1000 : null;
+    chrome.storage.sync.set({ enabled, timer, topic, apiKey, timerEndTime, isMonitoring: enabled }, () => {
       updateExtensionState(enabled, topic, timer);
-      
-      if (enabled) {
+      if(enabled){
         updateTimerDisplay();
-        if (!timerInterval) {
-          timerInterval = setInterval(updateTimerDisplay, 1000);
-        }
+        if(timerInterval) clearInterval(timerInterval);
+        timerInterval = setInterval(updateTimerDisplay,1000);
+        chrome.alarms.create('youtubeSuggestion', { delayInMinutes: timer });
+        checkConnection();
       } else {
-        if (timerInterval) {
-          clearInterval(timerInterval);
-          timerInterval = null;
-        }
-        timerDisplay.textContent = '00:00';
+        if(timerInterval) { clearInterval(timerInterval); timerInterval=null; }
+        timerDisplay.textContent='00:00';
+        chrome.alarms.clear('youtubeSuggestion');
       }
+      // Trigger immediate content check (background uses stored key)
+      chrome.runtime.sendMessage({ action: 'checkContent' });
+      window.close();
     });
   });
 
@@ -196,31 +208,5 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  saveButton.addEventListener('click', () => {
-    const enabled = enabledCheckbox.checked;
-    const timer = parseInt(timerInput.value, 10);
-    const topic = topicInput.value;
-
-    if (enabled) {
-      const timerEndTime = Date.now() + timer * 60 * 1000;
-      chrome.storage.sync.set({ enabled, timer, topic, timerEndTime, isMonitoring: true }, () => {
-        console.log('Settings saved and monitoring started');
-        chrome.alarms.create('youtubeSuggestion', { delayInMinutes: timer });
-        updateTimerDisplay();
-        if (timerInterval) clearInterval(timerInterval);
-        timerInterval = setInterval(updateTimerDisplay, 1000);
-        // Trigger immediate content check
-        chrome.runtime.sendMessage({ action: 'checkContent' });
-        window.close();
-      });
-    } else {
-      chrome.storage.sync.set({ enabled, timer, topic, timerEndTime: null, isMonitoring: false }, () => {
-        console.log('Settings saved and monitoring stopped');
-        chrome.alarms.clear('youtubeSuggestion');
-        if (timerInterval) clearInterval(timerInterval);
-        timerDisplay.textContent = '00:00';
-        window.close();
-      });
-    }
-  });
+  // Removed duplicate saveButton listener (merged above)
 });
