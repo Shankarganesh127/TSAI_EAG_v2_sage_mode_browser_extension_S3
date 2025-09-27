@@ -98,6 +98,81 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // Load saved settings
+  function loadSettings() {
+    chrome.storage.sync.get(['enabled', 'timer', 'topic'], (settings) => {
+      enabledCheckbox.checked = settings.enabled || false;
+      timerInput.value = settings.timer || 5;
+      topicInput.value = settings.topic || '';
+      
+      // Update extension state in background
+      updateExtensionState(settings.enabled, settings.topic, settings.timer);
+    });
+  }
+
+  // Update extension state in background script
+  function updateExtensionState(enabled, topic, timer) {
+    chrome.runtime.sendMessage({
+      action: 'setExtensionState',
+      enabled: enabled,
+      topic: topic,
+      timer: parseInt(timer)
+    }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.error('Error updating extension state:', chrome.runtime.lastError);
+      } else if (response && response.success) {
+        console.log('Extension state updated successfully');
+      }
+    });
+  }
+
+  // Save settings with extension state update
+  saveButton.addEventListener('click', () => {
+    const enabled = enabledCheckbox.checked;
+    const timer = parseInt(timerInput.value);
+    const topic = topicInput.value.trim();
+
+    if (!topic && enabled) {
+      alert('Please enter a topic before enabling the extension.');
+      enabledCheckbox.checked = false;
+      return;
+    }
+
+    chrome.storage.sync.set({
+      enabled: enabled,
+      timer: timer,
+      topic: topic,
+      timerEndTime: enabled ? Date.now() + (timer * 60 * 1000) : null
+    }, () => {
+      // Update extension state
+      updateExtensionState(enabled, topic, timer);
+      
+      if (enabled) {
+        updateTimerDisplay();
+        if (!timerInterval) {
+          timerInterval = setInterval(updateTimerDisplay, 1000);
+        }
+      } else {
+        if (timerInterval) {
+          clearInterval(timerInterval);
+          timerInterval = null;
+        }
+        timerDisplay.textContent = '00:00';
+      }
+    });
+  });
+
+  // Handle checkbox state change
+  enabledCheckbox.addEventListener('change', () => {
+    if (enabledCheckbox.checked && !topicInput.value.trim()) {
+      alert('Please enter a topic before enabling the extension.');
+      enabledCheckbox.checked = false;
+      return;
+    }
+    updateExtensionState(enabledCheckbox.checked, topicInput.value.trim(), parseInt(timerInput.value));
+  });
+
+  // Initial load
+  loadSettings();
   chrome.storage.sync.get(['enabled', 'timer', 'topic'], (result) => {
     if (result.enabled) {
       enabledCheckbox.checked = result.enabled;

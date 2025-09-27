@@ -4,6 +4,9 @@ const GEMINI_API_KEY = 'AIzaSyBe4P7dmOiBy6gE9Yys4kk0CHf8r04EC0Q';
 let modelConfigured = false;
 let suggestedVideos = new Set(); // Store suggested video URLs
 let lastRequestTime = 0; // Track the last API request time
+let isExtensionEnabled = false; // Track extension state
+let selectedTopic = ''; // Store the currently selected topic
+let originalTimer = 0; // Store the original timer value
 
 // Initialize Gemini API connection
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -29,29 +32,100 @@ async function getYouTubeVideoSuggestion(topic) {
   try {
     console.log('🎥 Getting video suggestion for topic:', topic);
 
-    const prompt = `Suggest an educational YouTube video about "${topic}".
-Consider:
-1. Video should be from a reputable source
-2. Content should be educational and informative
-3. Should be suitable for learning about the topic
-4. Prefer recent, high-quality content
+    const prompt = `Suggest a popular, currently available educational YouTube video about "${topic}".
+Consider these STRICT requirements:
+1. Must be from one of these channels ONLY:
+   - freeCodeCamp.org
+   - Coursera
+   - Khan Academy
+   - Microsoft Developer
+   - Google Developers
+   - MIT OpenCourseWare
+   - Stanford Online
+2. Must be a recent video (2023 or newer)
+3. Must be from the channel's main playlist or featured content
+4. Must be a complete, standalone lesson (not a preview or trailer)
 
 Format your response exactly like this:
-VIDEO_TITLE: [title]
-VIDEO_URL: [full YouTube URL]
-REASON: [why this video is relevant]`;
+VIDEO_TITLE: [exact title as shown on YouTube]
+VIDEO_URL: [complete YouTube URL, must be from a major channel]
+REASON: [briefly explain why this is a reliable source]`;
 
+    // Make the API call to Gemini
     const response = await GoogleGenerativeAI.generateContent(GEMINI_API_KEY, prompt);
-    const urlMatch = response.match(/VIDEO_URL:\s*(https:\/\/(?:www\.)?youtube\.com\/[^\s]+)/i);
+    
+    // Log full response for debugging
+    console.log('Raw Gemini response:', response);
+
+    // Simple URL extraction
+    const response_text = response.text ? response.text : response;
+    const urlMatch = response_text.match(/VIDEO_URL:\s*(https:\/\/(?:www\.)?youtube\.com\/[^\s]+)/i);
     
     if (!urlMatch) {
       throw new Error('No valid YouTube URL found in response');
     }
+    
+    // Clean and validate the URL
+    let extractedUrl = urlMatch[1].trim();
+    
+    // Remove any trailing punctuation or special characters
+    if (extractedUrl.endsWith('.') || extractedUrl.endsWith(',') || extractedUrl.endsWith('"') || extractedUrl.endsWith("'")) {
+      extractedUrl = extractedUrl.slice(0, -1);
+    }
+    
+    // Additional validation for watch URL format
+    if (!extractedUrl.includes('youtube.com/watch?v=')) {
+      throw new Error('Invalid YouTube video URL format');
+    }
 
-    return urlMatch[1];
+    return extractedUrl;
+
+    return url;
   } catch (error) {
     console.error('❌ Error getting video suggestion:', error);
     return null;
+  }
+}
+
+async function extractPageContent(tabId) {
+  try {
+    // Get tab information
+    const tab = await chrome.tabs.get(tabId);
+    if (!tab.url) throw new Error('No URL available');
+
+    // Only process http/https URLs
+    if (!tab.url.startsWith('http')) {
+      return ['System', 'Browser Page', ''];
+    }
+
+    // For YouTube URLs, extract info from URL and title
+    if (tab.url.includes('youtube.com')) {
+      const videoId = tab.url.match(/[?&]v=([^&]+)/)?.[1] || '';
+      return ['Video', 'YouTube Content', tab.title || ''];
+    }
+
+    // For other pages, use the title and URL for basic analysis
+    const analyzePrompt = `Analyze this webpage title and URL to determine its likely category and topic:
+
+Title: ${tab.title || 'Untitled'}
+URL: ${tab.url}
+
+Response format:
+CATEGORY: [broad category like Technology, Science, History, etc.]
+TOPIC: [specific topic within category]`;
+
+    const analysis = await GoogleGenerativeAI.generateContent(GEMINI_API_KEY, analyzePrompt);
+    const categoryMatch = analysis.match(/CATEGORY:\s*([^\n]+)/i);
+    const topicMatch = analysis.match(/TOPIC:\s*([^\n]+)/i);
+
+    return [
+      categoryMatch ? categoryMatch[1].trim() : 'Unknown',
+      topicMatch ? topicMatch[1].trim() : 'Unknown',
+      tab.title || ''
+    ];
+  } catch (error) {
+    console.error('❌ Error extracting page content:', error);
+    return ['Unknown', 'Unknown', ''];
   }
 }
 
@@ -92,6 +166,90 @@ REASON: [brief explanation]`;
   } catch (error) {
     console.error('❌ Topic comparison error:', error);
     return { isRelevant: false, confidence: 0, reason: 'Error comparing topics' };
+  }
+}
+
+// Listen for new tab creation
+chrome.tabs.onCreated.addListener(async (tab) => {
+  if (!isExtensionEnabled || !selectedTopic) return;
+  
+  // Wait for the tab to complete loading
+  chrome.tabs.onUpdated.addListener(function listener(tabId, info) {
+    if (tabId === tab.id && info.status === 'complete') {
+      chrome.tabs.onUpdated.removeListener(listener);
+      checkNewTabContent(tab.id);
+    }
+  });
+});
+
+// Handle extension enable/disable
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'setExtensionState') {
+    isExtensionEnabled = request.enabled;
+    selectedTopic = request.topic || '';
+    originalTimer = request.timer || 0;
+    console.log(`Extension ${isExtensionEnabled ? 'enabled' : 'disabled'} for topic: ${selectedTopic}`);
+    sendResponse({ success: true });
+  }
+});
+
+async function checkNewTabContent(tabId) {
+  try {
+    console.log('🔄 Checking New Tab Content');
+    
+    // Get the tab content
+    const tab = await chrome.tabs.get(tabId);
+    if (!tab || !tab.url || tab.url.startsWith('chrome://')) return;
+
+    // Extract content from the tab
+    const [category, topic, content] = await extractPageContent(tab.id);
+    
+    // Compare with selected topic
+    const { isRelevant, confidence } = await compareTopics(category, topic, selectedTopic);
+    
+    // Update highlight color based on relevance
+    await chrome.tabs.sendMessage(tab.id, {
+      action: 'updateHighlight',
+      color: isRelevant ? 'green' : 'red'
+    });
+
+    // If content is not relevant, get and open a new video
+    if (!isRelevant) {
+      try {
+        console.log('🎥 Getting video suggestion for topic:', selectedTopic);
+        const videoUrl = await getYouTubeVideoSuggestion(selectedTopic);
+        
+        if (videoUrl) {
+          console.log('✅ Got valid video URL:', videoUrl);
+          
+          // Create new tab with suggested video
+          const newTab = await chrome.tabs.create({ url: videoUrl });
+          console.log('✅ Created new tab:', newTab.id);
+          
+          // Close the current non-relevant tab after a short delay
+          setTimeout(async () => {
+            try {
+              await chrome.tabs.remove(tab.id);
+              console.log('✅ Closed old tab:', tab.id);
+            } catch (removeError) {
+              console.error('❌ Error closing old tab:', removeError);
+            }
+          }, 500);
+          
+          // Reset timer
+          if (originalTimer > 0) {
+            chrome.alarms.create('contentCheck', { delayInMinutes: originalTimer });
+            console.log('⏰ Reset timer to:', originalTimer, 'minutes');
+          }
+        } else {
+          console.error('❌ No valid video URL returned');
+        }
+      } catch (videoError) {
+        console.error('❌ Error in video suggestion process:', videoError);
+      }
+    }
+  } catch (error) {
+    console.error('❌ Error checking new tab content:', error);
   }
 }
 
