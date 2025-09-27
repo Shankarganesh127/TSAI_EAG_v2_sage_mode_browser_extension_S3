@@ -2,7 +2,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const enabledCheckbox = document.getElementById('enabled');
   const timerInput = document.getElementById('timer');
   const topicInput = document.getElementById('topic');
-  const openSettingsBtn = document.getElementById('open-settings');
   const saveButton = document.getElementById('save');
   const timerDisplay = document.getElementById('timer-display');
   const statusDot = document.getElementById('status-indicator');
@@ -159,10 +158,6 @@ document.addEventListener('DOMContentLoaded', () => {
         timerDisplay.textContent='00:00';
         chrome.alarms.clear('youtubeSuggestion');
       }
-  openSettingsBtn.addEventListener('click', () => {
-    if(chrome.runtime.openOptionsPage){ chrome.runtime.openOptionsPage(); }
-    else window.open(chrome.runtime.getURL('options.html'));
-  });
       // Trigger immediate content check (background uses stored key)
       chrome.runtime.sendMessage({ action: 'checkContent' });
       window.close();
