@@ -150,163 +150,49 @@ REASON: <concise>`;
 }
 
 async function suggestVideo(topic){
-	if(!API_KEY) return null; const trusted=TRUSTED_CHANNEL_PATTERNS; const triedIds=new Set();
-	// Only treat 429 (rate limit) as soft; 401/403 often means gated/unplayable -> reject
-	const SOFT_FAIL_STATUSES = new Set([429]);
-	const debugLog = [];
+    if(!API_KEY) return null;
+    const debugLog=[];
+    // Single lightweight prompt
+    const prompt=`Provide ONE YouTube video URL helpful for topic: ${topic}. Only output the URL.`;
+    try {
+        const raw=await gem(prompt);
+        debugLog.push({phase:'raw',snippet:raw.slice(0,180)});
+        const url=extractFirstYoutubeUrl(raw);
+        if(url){ chrome.storage.local.set({suggestionDebug:debugLog}); return url; }
+        // Retry with a stricter instruction if first failed
+        const retryPrompt=`Only output a single canonical YouTube watch URL (https://www.youtube.com/watch?v=VIDEOID) for topic: ${topic}.`;
+        const raw2=await gem(retryPrompt);
+        debugLog.push({phase:'retry',snippet:raw2.slice(0,180)});
+        const url2=extractFirstYoutubeUrl(raw2);
+        if(url2){ chrome.storage.local.set({suggestionDebug:debugLog}); return url2; }
+    } catch(e){ debugLog.push({phase:'error',error:e.message}); }
+    chrome.storage.local.set({suggestionDebug:debugLog});
+    return null;
+}
 
-	// Token utilities for title-topic relevance
-	const STOP_WORDS = new Set(['the','a','an','and','for','with','of','to','on','in','by','from','about','how','learn','guide','tutorial','course','introduction','intro']);
-	function tokenize(str){ return (str||'').toLowerCase().replace(/[^a-z0-9+.# ]+/g,' ').split(/\s+/).filter(w=>w.length>2 && !STOP_WORDS.has(w)); }
-	const topicTokens = tokenize(topic);
-	function titleRelevant(title){
-		const titleTokens = tokenize(title);
-		if(!titleTokens.length||!topicTokens.length) return true; // can't decide -> allow
-		let overlap=0; for(const t of topicTokens){ if(titleTokens.includes(t)) overlap++; }
-		return overlap>0; // at least one meaningful token overlap
-	}
-
-	// 1. Try structured JSON MULTI-CANDIDATE approach first
-	try {
-		// Helper: robust availability + title fetch using YouTube oEmbed first, then noembed.com fallback
-		async function robustFetchMeta(url){
-			// Primary: YouTube oEmbed
-			try {
-				const r=await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(url)}`);
-				if(r.ok){
-					try { const j=await r.json(); if(j && j.title) return {ok:true,title:j.title,source:'youtube-oembed',status:r.status}; } catch{}
-				}
-			} catch(e){ /* ignore, will try fallback */ }
-			// Fallback: noembed.com (often succeeds for region/age gated differences)
-			try {
-				const r2=await fetch(`https://noembed.com/embed?url=${encodeURIComponent(url)}`);
-				if(r2.ok){
-					try { const j=await r2.json(); if(j && j.title && /youtube/i.test(j.provider_name||'')) return {ok:true,title:j.title,source:'noembed',status:r2.status}; } catch{}
-				}
-			} catch(e){ /* ignore */ }
-			return {ok:false};
-		}
-		const jsonPrompt = `Return a STRICT single-line JSON array ONLY (no backticks). Each element: {video_url, channel, confidence, rationale}. Provide 3-4 diverse CANDIDATES for topic: ${topic}.
-Rules:
- - channel substring must include one of: ${trusted.join(', ')} (case-insensitive)
- - video_url canonical EXACT form https://www.youtube.com/watch?v=VIDEOID (11 chars)
- - disallow playlists (&list=), shorts (/shorts/), youtu.be, live, music videos unrelated to education
- - prefer uploads year >=2023
- - high relevance: ensure title likely contains at least one major topic keyword
-Example: [{"video_url":"https://www.youtube.com/watch?v=abcdefghijk","channel":"freeCodeCamp","confidence":0.93,"rationale":"Covers core ${topic} concepts"}]`;
-		const rawJson = await GoogleGenerativeAI.generateJson(API_KEY, jsonPrompt).catch(e=>{ throw e; });
-		debugLog.push({phase:'json-multi-attempt',rawSnippet:rawJson.slice(0,180)});
-		let candidates=[];
-		try { candidates = JSON.parse(rawJson.trim()); if(!Array.isArray(candidates)) throw new Error('Not array'); } catch(e){ debugLog.push({phase:'json-multi-parse-error',error:e.message}); candidates=[]; }
-		const vetted=[];
-		for(const c of candidates){
-			if(!c||typeof c!=='object') continue;
-			const url=c.video_url||c.url; const channel=(c.channel||'').toLowerCase();
-			if(!url||!/https:\/\/www\.youtube\.com\/watch\?v=[A-Za-z0-9_-]{11}$/.test(url)) { vetted.push({url,skip:true,reason:'bad_format'}); continue; }
-			if(!trusted.some(p=>channel.includes(p))){ vetted.push({url,skip:true,reason:'untrusted_channel'}); continue; }
-			const idMatch=url.match(/v=([A-Za-z0-9_-]{11})$/); const vid=idMatch? idMatch[1]:null; if(vid && rejectedVideoIds.has(vid)){ vetted.push({url,skip:true,reason:'rejected_before'}); continue; }
-			try {
-				const meta = await robustFetchMeta(url);
-				if(meta.ok){
-					const titleOk = titleRelevant(meta.title);
-					if(titleOk){ debugLog.push({phase:'json-candidate-accept',url,source:meta.source,title:meta.title}); chrome.storage.local.set({suggestionDebug:debugLog}); return url; }
-					debugLog.push({phase:'json-candidate-title-mismatch',url,source:meta.source,title:meta.title});
-					vetted.push({url,skip:false,reason:'title_mismatch'});
-				} else {
-					if(vid) rejectedVideoIds.add(vid);
-					vetted.push({url,skip:false,reason:'unavailable'});
-				}
-			} catch(e){ vetted.push({url,skip:false,reason:'fetch_error_'+e.message}); }
-		}
-		// fallback to first non-skipped vetted candidate (even if title mismatch) to avoid starvation
-		const fallbackCandidate = vetted.find(v=>!v.skip && v.url && !/oembed_404/.test(v.reason));
-		if(fallbackCandidate){ debugLog.push({phase:'json-fallback-candidate',candidate:fallbackCandidate}); chrome.storage.local.set({suggestionDebug:debugLog}); return fallbackCandidate.url; }
-	} catch(e){ debugLog.push({phase:'json-multi-failed',error:e.message}); }
-
-	// Generic candidate extraction utility (robust "grep" of any YouTube links)
-	function extractYoutubeCandidates(text){
-		if(!text) return [];
-		const rawCandidates = new Set();
-		// Match watch urls (with possible extra params) and youtu.be short links, also m.youtube variants
-		const regex = /(https?:\/\/(?:m\.|www\.)?youtube\.com\/watch\?[^\s"'`<>]+|https?:\/\/youtu\.be\/([A-Za-z0-9_-]{11}))/gi;
-		let m; while((m=regex.exec(text))){ rawCandidates.add(m[0]); }
-		const cleaned = new Set();
-		for(const c of rawCandidates){
-			let url = c.trim();
-			url = url.replace(/[)\]}>,.;:'"`]+$/,''); // strip trailing punctuation
-			// Normalize youtu.be
-			const shortMatch = url.match(/https?:\/\/youtu\.be\/([A-Za-z0-9_-]{11})/i);
-			if(shortMatch){ url = `https://www.youtube.com/watch?v=${shortMatch[1]}`; }
-			// Ensure https and www canonical
-			if(/youtube\.com\/watch/i.test(url)){
-				try {
-					const u = new URL(url);
-					const vid = u.searchParams.get('v');
-					if(vid && /^[A-Za-z0-9_-]{11}$/.test(vid)){
-						// Remove unwanted params (list, index, t, feature, etc.)
-						url = `https://www.youtube.com/watch?v=${vid}`;
-						if(/shorts\//i.test(u.pathname) || u.searchParams.has('list')) continue; // skip disallowed forms
-						cleaned.add(url);
-					}
-				} catch{}
-			}
-		}
-		return [...cleaned];
-	}
-
-	// Helper to test arbitrary text for candidates after legacy or JSON failures
-	async function candidatesFromFreeText(rawText){
-		const list = extractYoutubeCandidates(rawText).filter(u=>{
-			const idm=u.match(/v=([A-Za-z0-9_-]{11})$/); if(!idm) return false;
-			if(triedIds.has(idm[1]) || rejectedVideoIds.has(idm[1])) return false;
-			return true;
-		});
-		for(const url of list){
-			const idm=url.match(/v=([A-Za-z0-9_-]{11})$/); if(idm) triedIds.add(idm[1]);
-			try {
-				const v=await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(url)}`);
-				if(!v.ok) { if(idm) rejectedVideoIds.add(idm[1]); continue; }
-				let title=''; let titleOk=true; try { const meta=await v.json(); title=meta.title||''; titleOk=titleRelevant(title); } catch{}
-				if(titleOk){ debugLog.push({phase:'freetext-accept',url,title}); chrome.storage.local.set({suggestionDebug:debugLog}); return url; }
-				debugLog.push({phase:'freetext-title-mismatch',url,title});
-			} catch(e){ debugLog.push({phase:'freetext-error',url,error:e.message}); }
-		}
-		return null;
-	}
-
-	// 2. Fallback to legacy iterative text prompt approach
-	async function verify(url){
-		try {
-			const r=await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(url)}`);
-			if(!r.ok){ return {ok:false, status:r.status, reason:'oEmbed status '+r.status}; }
-			const j=await r.json().catch(()=>null);
-			if(!j||!j.title) return {ok:false,reason:'oEmbed missing title'};
-			const rel=titleRelevant(j.title);
-			if(!rel) return {ok:false, status:r.status, reason:'title not matching topic', title:j.title};
-			return {ok:true,title:j.title};
-		} catch(e){ return {ok:false,reason:'oEmbed fetch error '+e.message}; }
-	}
-	const base=(a)=>`Return ONLY one viable, currently accessible YouTube educational video.\nTopic: ${topic}\nRules:\n - Channel must be one of (case-insensitive contains): ${trusted.join(', ')}\n - Prefer upload year >= 2023\n - MUST use canonical watch URL form: https://www.youtube.com/watch?v=VIDEOID (11 chars)\n - NO playlists (no &list=), NO shorts (/shorts/), NO youtu.be links, NO live streams\n - If prior attempt invalid${a? ' (bad/unavailable/duplicate)':''}, choose a different trusted channel.\nOutput EXACTLY:\nVIDEO_URL: https://www.youtube.com/watch?v=XXXXXXXXXXX\nCHANNEL: <channel name>`;
-	function parse(raw){ if(!raw) return {ok:false,reason:'empty raw'}; const m=raw.match(/VIDEO_URL:\s*(https:\/\/www\.youtube\.com\/watch\?v=([A-Za-z0-9_-]{11}))/i); if(!m) return {ok:false,reason:'no watch url'}; const url=m[1]; const id=m[2]; if(triedIds.has(id)) return {ok:false,reason:'duplicate id'}; if(/(&|\?)list=|shorts\//i.test(url)) return {ok:false,reason:'playlist/shorts disallowed'}; const chm=raw.match(/CHANNEL:\s*([^\n]+)/i); const ch=(chm? chm[1].trim():'').toLowerCase(); if(!ch) return {ok:false,reason:'missing channel'}; if(!trusted.some(p=>ch.includes(p))) return {ok:false,reason:'untrusted channel'}; return {ok:true,url,id}; }
-
-	let fallback=null; let fallbackMeta=null;
-	for(let a=0;a<5;a++){
-		try {
-			const raw=await gem(base(a));
-			const parsed=parse(raw);
-			debugLog.push({attempt:a+1,rawSnippet:raw? raw.slice(0,140):'EMPTY',parsedOk:parsed.ok,reason:parsed.reason});
-			if(!parsed.ok){ console.warn('[SageMode] suggestion reject:', parsed.reason); continue; }
-			triedIds.add(parsed.id);
-			const ver=await verify(parsed.url);
-			if(ver.ok){ console.log('[SageMode] video verified via oEmbed+title'); debugLog.push({phase:'legacy-accept',title:ver.title}); chrome.storage.local.set({suggestionDebug:debugLog}); return parsed.url; }
-			console.warn('[SageMode] legacy reject:', ver.reason,'status',ver.status);
-			const idm=parsed.url.match(/v=([A-Za-z0-9_-]{11})$/); if(idm) rejectedVideoIds.add(idm[1]);
-			if(!fallback){ fallback=parsed.url; fallbackMeta=ver.reason; }
-		} catch(e){ console.warn('[SageMode] suggestion attempt error', e.message); debugLog.push({attempt:a+1,error:e.message}); }
-	}
-	if(fallback){ console.warn('[SageMode] using fallback candidate despite verification issues:', fallbackMeta); chrome.storage.local.set({suggestionDebug:debugLog}); return fallback; }
-	chrome.storage.local.set({suggestionDebug:debugLog});
-	return null;
+// Simple first-match extraction & canonicalization
+function extractFirstYoutubeUrl(text){
+    if(!text) return null;
+    // Accept watch urls or youtu.be short form
+    const regex=/(https?:\/\/(?:www\.)?youtube\.com\/watch\?[^\s"'<>]+|https?:\/\/youtu\.be\/([A-Za-z0-9_-]{11}))/i;
+    const m=regex.exec(text);
+    if(!m) return null;
+    let url=m[0].trim();
+    // Normalize trailing punctuation
+    url=url.replace(/[)\]}>,.;:'"`]+$/,'');
+    // Short form -> canonical
+    const short=url.match(/https?:\/\/youtu\.be\/([A-Za-z0-9_-]{11})/i);
+    if(short){ return `https://www.youtube.com/watch?v=${short[1]}`; }
+    try {
+        const u=new URL(url);
+        if(u.hostname.includes('youtube.com') && u.pathname==='/watch'){
+            const vid=u.searchParams.get('v');
+            if(vid && /^[A-Za-z0-9_-]{11}$/.test(vid)){
+                return `https://www.youtube.com/watch?v=${vid}`;
+            }
+        }
+    } catch{}
+    return null;
 }
 
 async function checkActiveTab(){
