@@ -168,6 +168,24 @@ async function suggestVideo(topic){
 
 	// 1. Try structured JSON MULTI-CANDIDATE approach first
 	try {
+		// Helper: robust availability + title fetch using YouTube oEmbed first, then noembed.com fallback
+		async function robustFetchMeta(url){
+			// Primary: YouTube oEmbed
+			try {
+				const r=await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(url)}`);
+				if(r.ok){
+					try { const j=await r.json(); if(j && j.title) return {ok:true,title:j.title,source:'youtube-oembed',status:r.status}; } catch{}
+				}
+			} catch(e){ /* ignore, will try fallback */ }
+			// Fallback: noembed.com (often succeeds for region/age gated differences)
+			try {
+				const r2=await fetch(`https://noembed.com/embed?url=${encodeURIComponent(url)}`);
+				if(r2.ok){
+					try { const j=await r2.json(); if(j && j.title && /youtube/i.test(j.provider_name||'')) return {ok:true,title:j.title,source:'noembed',status:r2.status}; } catch{}
+				}
+			} catch(e){ /* ignore */ }
+			return {ok:false};
+		}
 		const jsonPrompt = `Return a STRICT single-line JSON array ONLY (no backticks). Each element: {video_url, channel, confidence, rationale}. Provide 3-4 diverse CANDIDATES for topic: ${topic}.
 Rules:
  - channel substring must include one of: ${trusted.join(', ')} (case-insensitive)
@@ -187,23 +205,18 @@ Example: [{"video_url":"https://www.youtube.com/watch?v=abcdefghijk","channel":"
 			if(!url||!/https:\/\/www\.youtube\.com\/watch\?v=[A-Za-z0-9_-]{11}$/.test(url)) { vetted.push({url,skip:true,reason:'bad_format'}); continue; }
 			if(!trusted.some(p=>channel.includes(p))){ vetted.push({url,skip:true,reason:'untrusted_channel'}); continue; }
 			const idMatch=url.match(/v=([A-Za-z0-9_-]{11})$/); const vid=idMatch? idMatch[1]:null; if(vid && rejectedVideoIds.has(vid)){ vetted.push({url,skip:true,reason:'rejected_before'}); continue; }
-			// oEmbed verify
 			try {
-				const v=await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(url)}`);
-				if(v.ok){
-					let titleOk=true; let title='';
-					if(v.ok){ try { const meta=await v.json(); title=meta.title||''; titleOk=titleRelevant(title); } catch{} }
-					if(titleOk){ debugLog.push({phase:'json-candidate-accept',url,status:v.status,title}); chrome.storage.local.set({suggestionDebug:debugLog}); return url; }
-					debugLog.push({phase:'json-candidate-title-mismatch',url,status:v.status,title});
+				const meta = await robustFetchMeta(url);
+				if(meta.ok){
+					const titleOk = titleRelevant(meta.title);
+					if(titleOk){ debugLog.push({phase:'json-candidate-accept',url,source:meta.source,title:meta.title}); chrome.storage.local.set({suggestionDebug:debugLog}); return url; }
+					debugLog.push({phase:'json-candidate-title-mismatch',url,source:meta.source,title:meta.title});
 					vetted.push({url,skip:false,reason:'title_mismatch'});
-				} else if(SOFT_FAIL_STATUSES.has(v.status)) {
-					debugLog.push({phase:'json-soft-skip',url,status:v.status});
-					vetted.push({url,skip:false,reason:'soft_status_'+v.status});
 				} else {
 					if(vid) rejectedVideoIds.add(vid);
-					vetted.push({url,skip:false,reason:'oembed_'+v.status});
+					vetted.push({url,skip:false,reason:'unavailable'});
 				}
-			} catch(e){ vetted.push({url,skip:false,reason:'oembed_error_'+e.message}); }
+			} catch(e){ vetted.push({url,skip:false,reason:'fetch_error_'+e.message}); }
 		}
 		// fallback to first non-skipped vetted candidate (even if title mismatch) to avoid starvation
 		const fallbackCandidate = vetted.find(v=>!v.skip && v.url && !/oembed_404/.test(v.reason));
