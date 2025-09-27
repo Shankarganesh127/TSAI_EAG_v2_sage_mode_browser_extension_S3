@@ -92,29 +92,55 @@ async function suggestVideo(topic){
 	const SOFT_FAIL_STATUSES = new Set([401,403,429]);
 	const debugLog = [];
 
-	// 1. Try structured JSON approach first for deterministic parsing
+	// Token utilities for title-topic relevance
+	const STOP_WORDS = new Set(['the','a','an','and','for','with','of','to','on','in','by','from','about','how','learn','guide','tutorial','course','introduction','intro']);
+	function tokenize(str){ return (str||'').toLowerCase().replace(/[^a-z0-9+.# ]+/g,' ').split(/\s+/).filter(w=>w.length>2 && !STOP_WORDS.has(w)); }
+	const topicTokens = tokenize(topic);
+	function titleRelevant(title){
+		const titleTokens = tokenize(title);
+		if(!titleTokens.length||!topicTokens.length) return true; // can't decide -> allow
+		let overlap=0; for(const t of topicTokens){ if(titleTokens.includes(t)) overlap++; }
+		return overlap>0; // at least one meaningful token overlap
+	}
+
+	// 1. Try structured JSON MULTI-CANDIDATE approach first
 	try {
-		const jsonPrompt = `Return a STRICT single-line JSON object ONLY (no backticks) with keys: video_url, channel, confidence.
-Constraints:
- - topic: ${topic}
- - channel must contain one of: ${trusted.join(', ')} (case-insensitive substring)
- - video_url canonical form: https://www.youtube.com/watch?v=VIDEOID (11 chars)
- - no playlists, shorts, live, youtu.be, or additional params.
- - confidence: 0-1 number (estimate relevance to topic)
-Example: {"video_url":"https://www.youtube.com/watch?v=abcdefghijk","channel":"freeCodeCamp","confidence":0.92}`;
+		const jsonPrompt = `Return a STRICT single-line JSON array ONLY (no backticks). Each element: {video_url, channel, confidence, rationale}. Provide 3-4 diverse CANDIDATES for topic: ${topic}.
+Rules:
+ - channel substring must include one of: ${trusted.join(', ')} (case-insensitive)
+ - video_url canonical EXACT form https://www.youtube.com/watch?v=VIDEOID (11 chars)
+ - disallow playlists (&list=), shorts (/shorts/), youtu.be, live, music videos unrelated to education
+ - prefer uploads year >=2023
+ - high relevance: ensure title likely contains at least one major topic keyword
+Example: [{"video_url":"https://www.youtube.com/watch?v=abcdefghijk","channel":"freeCodeCamp","confidence":0.93,"rationale":"Covers core ${topic} concepts"}]`;
 		const rawJson = await GoogleGenerativeAI.generateJson(API_KEY, jsonPrompt).catch(e=>{ throw e; });
-		debugLog.push({phase:'json-attempt',rawSnippet:rawJson.slice(0,160)});
-		try {
-			const parsed = JSON.parse(rawJson.trim());
-			const url = parsed.video_url || parsed.url;
-			const channel = (parsed.channel||'').toLowerCase();
-			if(url && /https:\/\/www\.youtube\.com\/watch\?v=[A-Za-z0-9_-]{11}$/.test(url) && trusted.some(p=>channel.includes(p))){
-				// Quick verify
-				try { const v=await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(url)}`); if(v.ok || SOFT_FAIL_STATUSES.has(v.status)){ debugLog.push({phase:'json-verify',status:v.status}); chrome.storage.local.set({suggestionDebug:debugLog}); return url; } } catch(e){ debugLog.push({phase:'json-verify-error',error:e.message}); chrome.storage.local.set({suggestionDebug:debugLog}); return url; }
-			}
-			debugLog.push({phase:'json-parse-reject',reason:'Validation failed'});
-		} catch(e){ debugLog.push({phase:'json-parse-error',error:e.message}); }
-	} catch(e){ debugLog.push({phase:'json-attempt-failed',error:e.message}); }
+		debugLog.push({phase:'json-multi-attempt',rawSnippet:rawJson.slice(0,180)});
+		let candidates=[];
+		try { candidates = JSON.parse(rawJson.trim()); if(!Array.isArray(candidates)) throw new Error('Not array'); } catch(e){ debugLog.push({phase:'json-multi-parse-error',error:e.message}); candidates=[]; }
+		const vetted=[];
+		for(const c of candidates){
+			if(!c||typeof c!=='object') continue;
+			const url=c.video_url||c.url; const channel=(c.channel||'').toLowerCase();
+			if(!url||!/https:\/\/www\.youtube\.com\/watch\?v=[A-Za-z0-9_-]{11}$/.test(url)) { vetted.push({url,skip:true,reason:'bad_format'}); continue; }
+			if(!trusted.some(p=>channel.includes(p))){ vetted.push({url,skip:true,reason:'untrusted_channel'}); continue; }
+			// oEmbed verify
+			try {
+				const v=await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(url)}`);
+				if(v.ok || SOFT_FAIL_STATUSES.has(v.status)){
+					let titleOk=true; let title='';
+					if(v.ok){ try { const meta=await v.json(); title=meta.title||''; titleOk=titleRelevant(title); } catch{} }
+					if(titleOk){ debugLog.push({phase:'json-candidate-accept',url,status:v.status,title}); chrome.storage.local.set({suggestionDebug:debugLog}); return url; }
+					debugLog.push({phase:'json-candidate-title-mismatch',url,status:v.status,title});
+					vetted.push({url,skip:false,reason:'title_mismatch'});
+				} else {
+					vetted.push({url,skip:false,reason:'oembed_'+v.status});
+				}
+			} catch(e){ vetted.push({url,skip:false,reason:'oembed_error_'+e.message}); }
+		}
+		// fallback to first non-skipped vetted candidate (even if title mismatch) to avoid starvation
+		const fallbackCandidate = vetted.find(v=>!v.skip && v.url);
+		if(fallbackCandidate){ debugLog.push({phase:'json-fallback-candidate',candidate:fallbackCandidate}); chrome.storage.local.set({suggestionDebug:debugLog}); return fallbackCandidate.url; }
+	} catch(e){ debugLog.push({phase:'json-multi-failed',error:e.message}); }
 
 	// 2. Fallback to legacy iterative text prompt approach
 	async function verify(url){
@@ -123,7 +149,9 @@ Example: {"video_url":"https://www.youtube.com/watch?v=abcdefghijk","channel":"f
 			if(!r.ok){ return {ok:false, status:r.status, reason:'oEmbed status '+r.status}; }
 			const j=await r.json().catch(()=>null);
 			if(!j||!j.title) return {ok:false,reason:'oEmbed missing title'};
-			return {ok:true};
+			const rel=titleRelevant(j.title);
+			if(!rel) return {ok:false, status:r.status, reason:'title not matching topic', title:j.title};
+			return {ok:true,title:j.title};
 		} catch(e){ return {ok:false,reason:'oEmbed fetch error '+e.message}; }
 	}
 	const base=(a)=>`Return ONLY one viable, currently accessible YouTube educational video.\nTopic: ${topic}\nRules:\n - Channel must be one of (case-insensitive contains): ${trusted.join(', ')}\n - Prefer upload year >= 2023\n - MUST use canonical watch URL form: https://www.youtube.com/watch?v=VIDEOID (11 chars)\n - NO playlists (no &list=), NO shorts (/shorts/), NO youtu.be links, NO live streams\n - If prior attempt invalid${a? ' (bad/unavailable/duplicate)':''}, choose a different trusted channel.\nOutput EXACTLY:\nVIDEO_URL: https://www.youtube.com/watch?v=XXXXXXXXXXX\nCHANNEL: <channel name>`;
@@ -138,7 +166,7 @@ Example: {"video_url":"https://www.youtube.com/watch?v=abcdefghijk","channel":"f
 			if(!parsed.ok){ console.warn('[SageMode] suggestion reject:', parsed.reason); continue; }
 			triedIds.add(parsed.id);
 			const ver=await verify(parsed.url);
-			if(ver.ok){ console.log('[SageMode] video verified via oEmbed'); chrome.storage.local.set({suggestionDebug:debugLog}); return parsed.url; }
+			if(ver.ok){ console.log('[SageMode] video verified via oEmbed+title'); debugLog.push({phase:'legacy-accept',title:ver.title}); chrome.storage.local.set({suggestionDebug:debugLog}); return parsed.url; }
 			if(SOFT_FAIL_STATUSES.has(ver.status)){ console.warn('[SageMode] oEmbed soft-fail (accepting anyway):', ver.reason); chrome.storage.local.set({suggestionDebug:debugLog}); return parsed.url; }
 			console.warn('[SageMode] oEmbed hard reject:', ver.reason,'status',ver.status);
 			if(!fallback){ fallback=parsed.url; fallbackMeta=ver.reason; }
