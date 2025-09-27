@@ -1,6 +1,6 @@
 import { GoogleGenerativeAI } from './lib/gemini.js';
 
-// State
+// --- State ---------------------------------------------------------------
 let API_KEY = null;
 let modelConfigured = false;
 let isExtensionEnabled = false;
@@ -8,11 +8,12 @@ let selectedTopic = '';
 let originalTimer = 0;
 let isCheckingConnection = false;
 let pendingCheck = null;
-import { GoogleGenerativeAI } from './lib/gemini.js';
 
-let API_KEY=null, modelConfigured=false, isExtensionEnabled=false, selectedTopic='', originalTimer=0, isCheckingConnection=false, pendingCheck=null;
-const comparisonCache=new Map();
-const classificationCache=new Map();
+// Caches (single instances)
+const comparisonCache = new Map();
+const classificationCache = new Map();
+
+console.log('[SageMode] background script loaded');
 const TRUSTED_CHANNEL_PATTERNS=[ 'freecodecamp','khan','coursera','google developers','microsoft developer','mit opencourseware','stanford online','ibm technology','nvidia developer','tensorflow' ];
 
 chrome.storage.sync.get(['apiKey'], r=>{ API_KEY=r.apiKey? r.apiKey.trim():null; });
@@ -126,4 +127,3 @@ chrome.runtime.onInstalled.addListener(()=>{ chrome.storage.sync.get(['enabled',
 setInterval(async()=>{ try { const {timerEndTime}=await chrome.storage.sync.get('timerEndTime'); if(timerEndTime){ chrome.runtime.sendMessage({action:'timerUpdate',timerEndTime}); } } catch{} },15000);
 
 export {};
-const classificationCache = new Map();
