@@ -106,21 +106,46 @@ REASON: <short>`;
 
 async function suggestVideo(topic){
   if(!API_KEY) return null;
-  try {
-    const prompt = `One educational YouTube video.
-Topic:${topic}
-Channels: freeCodeCamp, Khan Academy, Coursera, Google Developers, Microsoft Developer, MIT OpenCourseWare, Stanford Online, IBM Technology, NVIDIA Developer, TensorFlow
-Year>=2023
-FORMAT:
-VIDEO_URL: https://www.youtube.com/watch?v=...\nCHANNEL: <name>`;
-    const t = await gem(prompt);
-    const urlMatch = t.match(/VIDEO_URL:\s*(https:\/\/www\.youtube\.com\/watch\?v=[^\s]+)/i);
-    if(!urlMatch) throw new Error('No URL');
-    const chMatch = t.match(/CHANNEL:\s*([^\n]+)/i);
-    const ch = chMatch? chMatch[1].toLowerCase():'';
-    if(!TRUSTED_CHANNEL_PATTERNS.some(p=>ch.includes(p))) throw new Error('Untrusted channel');
-    return urlMatch[1].trim();
-  } catch { return null; }
+  const trusted = TRUSTED_CHANNEL_PATTERNS;
+  const basePrompt = (attempt)=>`Return ONLY one viable, currently accessible YouTube educational video.
+Topic: ${topic}
+Rules:
+ - Channel must be one of (case-insensitive contains): ${trusted.join(', ')}
+ - Prefer upload year >= 2023
+ - MUST use canonical watch URL form: https://www.youtube.com/watch?v=VIDEOID (11 chars)
+ - NO playlists (no &list=), NO shorts (/shorts/), NO youtu.be short links, NO live streams
+ - If prior attempt invalid${attempt? ' (bad/unavailable/playlist/shorts)':''}, choose different channel.
+Output EXACTLY:
+VIDEO_URL: https://www.youtube.com/watch?v=XXXXXXXXXXX
+CHANNEL: <channel name>`;
+
+  function parseCandidate(raw){
+    if(!raw) return { ok:false, reason:'empty raw'};
+    const urlMatch = raw.match(/VIDEO_URL:\s*(https:\/\/www\.youtube\.com\/watch\?v=([A-Za-z0-9_-]{11}))/i);
+    if(!urlMatch) return { ok:false, reason:'no watch url'};
+    const fullUrl = urlMatch[1];
+    if(/(&|\?)list=|shorts\//i.test(fullUrl)) return { ok:false, reason:'playlist/shorts disallowed'};
+    const chMatch = raw.match(/CHANNEL:\s*([^\n]+)/i);
+    const channel = (chMatch? chMatch[1].trim(): '').toLowerCase();
+    if(!channel) return { ok:false, reason:'missing channel'};
+    if(!trusted.some(p=>channel.includes(p))) return { ok:false, reason:'untrusted channel'};
+    return { ok:true, url: fullUrl, channel };
+  }
+
+  for(let attempt=0; attempt<3; attempt++){
+    try {
+      const raw = await gem(basePrompt(attempt));
+      const candidate = parseCandidate(raw);
+      if(candidate.ok){
+        return candidate.url;
+      } else {
+        console.warn('[SageMode] video candidate rejected:', candidate.reason);
+      }
+    } catch (e) {
+      console.warn('[SageMode] video suggestion attempt failed', e.message);
+    }
+  }
+  return null; // fallback: none
 }
 
 async function checkActiveTab(){
