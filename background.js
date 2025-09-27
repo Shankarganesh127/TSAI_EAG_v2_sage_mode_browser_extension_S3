@@ -11,6 +11,7 @@ let pendingCheck = null;
 let lastCheckedUrl = null; // For SPA change detection
 let spaUrlPollInterval = null;
 let timerTickInterval = null;
+let monitorInterval = null; // 5-second re-check loop
 // Caches (single instances)
 const comparisonCache = new Map();
 const classificationCache = new Map();
@@ -56,9 +57,23 @@ function startTimerTick(){
 	timerTickInterval=setInterval(async()=>{
 		const {timerEndTime}=await chrome.storage.sync.get('timerEndTime');
 		if(!timerEndTime){ clearInterval(timerTickInterval); timerTickInterval=null; return; }
-		chrome.runtime.sendMessage({action:'timerTick',now:Date.now(),timerEndTime});
+		const now=Date.now();
+		chrome.runtime.sendMessage({action:'timerTick',now,timerEndTime,remainingMs:Math.max(0,timerEndTime-now)});
 	},1000);
 }
+
+// Start 5s monitoring loop
+function startMonitorLoop(){
+	if(monitorInterval) return;
+	monitorInterval=setInterval(async()=>{
+		try {
+			const {enabled,isMonitoring}=await chrome.storage.sync.get(['enabled','isMonitoring']);
+			if(!enabled||!isMonitoring){ return; }
+			scheduleCheck();
+		}catch(e){ /* silent */ }
+	},5000);
+}
+function stopMonitorLoop(){ if(monitorInterval){ clearInterval(monitorInterval); monitorInterval=null; } }
 
 console.log('[SageMode] background script loaded');
 const TRUSTED_CHANNEL_PATTERNS=[ 'freecodecamp','khan','coursera','google developers','microsoft developer','mit opencourseware','stanford online','ibm technology','nvidia developer','tensorflow' ];
@@ -113,7 +128,19 @@ async function compare(pageCategory,pageTopic,userTopic){
 	const key=`${pageCategory}|${pageTopic}|${userTopic}`.toLowerCase();
 	if(comparisonCache.has(key)) return comparisonCache.get(key);
 	try {
-		const prompt=`Relation?\nPAGE_CATEGORY:${pageCategory}\nPAGE_TOPIC:${pageTopic}\nUSER_TOPIC:${userTopic}\nMATCH: yes/no\nCONFIDENCE: 0-100\nREASON: <short>`;
+		const prompt=`Determine if PAGE_TOPIC is relevant to USER_TOPIC.
+PAGE_CATEGORY: ${pageCategory}
+PAGE_TOPIC: ${pageTopic}
+USER_TOPIC: ${userTopic}
+Instructions:
+- Answer MATCH yes only if PAGE_TOPIC is the same, a close synonym, or a clearly focused sub/super topic that would help study USER_TOPIC directly.
+- Super broad categories without specific alignment -> no.
+- If PAGE_TOPIC only mentions USER_TOPIC tangentially -> no.
+- Provide CONFIDENCE 0-100 integer.
+Output EXACT format:
+MATCH: yes|no
+CONFIDENCE: <0-100>
+REASON: <concise>`;
 		const t=await gem(prompt);
 		const isRelevant=/MATCH:\s*yes/i.test(t);
 		const c=t.match(/CONFIDENCE:\s*(\d{1,3})/i); const confidence=c? Math.min(100,parseInt(c[1],10))/100:0;
@@ -343,6 +370,8 @@ chrome.runtime.onMessage.addListener((req,_s,sendResponse)=>{
 		const prevEnabled=isExtensionEnabled, prevTopic=selectedTopic, prevTimer=originalTimer; isExtensionEnabled=req.enabled; selectedTopic=req.topic||''; originalTimer=req.timer||0; chrome.alarms.clear('contentCheck');
 		if(isExtensionEnabled){ if(!prevEnabled||prevTopic!==selectedTopic||prevTimer!==originalTimer){ chrome.alarms.clear('youtubeSuggestion'); chrome.storage.sync.set({timerEndTime:null}); } if(API_KEY && !modelConfigured){ GoogleGenerativeAI.generateContent(API_KEY,'ping').then(()=>{ modelConfigured=true; }).catch(()=>{ modelConfigured=false; chrome.action.setBadgeText({text:'KEY'}); chrome.action.setBadgeBackgroundColor({color:'#e67e22'}); }); } else if(!API_KEY){ chrome.action.setBadgeText({text:'KEY'}); chrome.action.setBadgeBackgroundColor({color:'#e67e22'}); } scheduleCheck(); }
 		else { chrome.action.setBadgeText({text:''}); chrome.alarms.clear('youtubeSuggestion'); chrome.storage.sync.set({timerEndTime:null}); }
+		// Manage 5s monitor loop
+		chrome.storage.sync.get(['isMonitoring']).then(r=>{ if(isExtensionEnabled && r.isMonitoring){ startMonitorLoop(); } else { stopMonitorLoop(); } });
 		sendResponse({success:true}); return true;
 	}
 	if(req.action==='checkContent'){ scheduleCheck(); sendResponse({success:true}); return true; }
