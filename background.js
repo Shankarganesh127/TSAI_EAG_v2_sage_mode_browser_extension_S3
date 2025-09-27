@@ -36,7 +36,25 @@ function scheduleCheck(){
 async function extractStructured(tabId){
   return new Promise((res,rej)=>{
     chrome.tabs.sendMessage(tabId,{action:'extractStructuredContent'},resp=>{
-      if(chrome.runtime.lastError) return rej(new Error(chrome.runtime.lastError.message));
+      if(chrome.runtime.lastError){
+        const msg = chrome.runtime.lastError.message || '';
+        // Fallback: attempt to programmatically inject content.js once, then retry
+        if(/Receiving end does not exist/i.test(msg)){
+          try {
+            chrome.scripting.executeScript({ target:{ tabId }, files:['content.js'] }, () => {
+              if(chrome.runtime.lastError){ return rej(new Error('Injection failed: '+chrome.runtime.lastError.message)); }
+              // Retry after injection
+              chrome.tabs.sendMessage(tabId,{action:'extractStructuredContent'},r2=>{
+                if(chrome.runtime.lastError) return rej(new Error(chrome.runtime.lastError.message));
+                if(!r2||!r2.success) return rej(new Error(r2?.error||'Extraction failed after inject'));
+                res(r2.data);
+              });
+            });
+          } catch(e){ return rej(new Error('Injection exception: '+e.message)); }
+          return; // exit early
+        }
+        return rej(new Error(msg));
+      }
       if(!resp||!resp.success) return rej(new Error(resp?.error||'Extraction failed'));
       res(resp.data);
     });
@@ -108,12 +126,18 @@ VIDEO_URL: https://www.youtube.com/watch?v=...\nCHANNEL: <name>`;
 async function checkActiveTab(){
   try {
     const { enabled, topic, isMonitoring } = await chrome.storage.sync.get(['enabled','topic','isMonitoring']);
-    if(!enabled || !topic || !isMonitoring){ chrome.action.setBadgeText({ text:''}); return; }
+    if(!enabled || !isMonitoring){ chrome.action.setBadgeText({ text:''}); return; }
     const [tab] = await chrome.tabs.query({ active:true, currentWindow:true });
     if(!tab) return;
     try { const u=new URL(tab.url); if(!/^https?:/.test(u.protocol)) return; } catch { return; }
     if(!API_KEY){ chrome.action.setBadgeText({ text:'KEY'}); chrome.action.setBadgeBackgroundColor({ color:'#e67e22'}); return; }
     const data = await extractStructured(tab.id);
+    if(!topic){
+      // We can still populate state minimally without relevance logic
+      chrome.action.setBadgeText({ text:'' });
+      chrome.storage.local.set({ currentState:{ currentContent: data.title.slice(0,120), pageUrl:data.url, timestamp:new Date().toISOString(), tabId:tab.id } });
+      return;
+    }
     const urlKey = data.url.split('#')[0];
     const cls = await classify(urlKey,data);
     const { isRelevant, confidence, reason } = await compare(cls.category, cls.topic, topic);
