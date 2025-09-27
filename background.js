@@ -183,6 +183,57 @@ Example: [{"video_url":"https://www.youtube.com/watch?v=abcdefghijk","channel":"
 		if(fallbackCandidate){ debugLog.push({phase:'json-fallback-candidate',candidate:fallbackCandidate}); chrome.storage.local.set({suggestionDebug:debugLog}); return fallbackCandidate.url; }
 	} catch(e){ debugLog.push({phase:'json-multi-failed',error:e.message}); }
 
+	// Generic candidate extraction utility (robust "grep" of any YouTube links)
+	function extractYoutubeCandidates(text){
+		if(!text) return [];
+		const rawCandidates = new Set();
+		// Match watch urls (with possible extra params) and youtu.be short links, also m.youtube variants
+		const regex = /(https?:\/\/(?:m\.|www\.)?youtube\.com\/watch\?[^\s"'`<>]+|https?:\/\/youtu\.be\/([A-Za-z0-9_-]{11}))/gi;
+		let m; while((m=regex.exec(text))){ rawCandidates.add(m[0]); }
+		const cleaned = new Set();
+		for(const c of rawCandidates){
+			let url = c.trim();
+			url = url.replace(/[)\]}>,.;:'"`]+$/,''); // strip trailing punctuation
+			// Normalize youtu.be
+			const shortMatch = url.match(/https?:\/\/youtu\.be\/([A-Za-z0-9_-]{11})/i);
+			if(shortMatch){ url = `https://www.youtube.com/watch?v=${shortMatch[1]}`; }
+			// Ensure https and www canonical
+			if(/youtube\.com\/watch/i.test(url)){
+				try {
+					const u = new URL(url);
+					const vid = u.searchParams.get('v');
+					if(vid && /^[A-Za-z0-9_-]{11}$/.test(vid)){
+						// Remove unwanted params (list, index, t, feature, etc.)
+						url = `https://www.youtube.com/watch?v=${vid}`;
+						if(/shorts\//i.test(u.pathname) || u.searchParams.has('list')) continue; // skip disallowed forms
+						cleaned.add(url);
+					}
+				} catch{}
+			}
+		}
+		return [...cleaned];
+	}
+
+	// Helper to test arbitrary text for candidates after legacy or JSON failures
+	async function candidatesFromFreeText(rawText){
+		const list = extractYoutubeCandidates(rawText).filter(u=>{
+			const idm=u.match(/v=([A-Za-z0-9_-]{11})$/); if(!idm) return false;
+			if(triedIds.has(idm[1]) || rejectedVideoIds.has(idm[1])) return false;
+			return true;
+		});
+		for(const url of list){
+			const idm=url.match(/v=([A-Za-z0-9_-]{11})$/); if(idm) triedIds.add(idm[1]);
+			try {
+				const v=await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(url)}`);
+				if(!v.ok) { if(idm) rejectedVideoIds.add(idm[1]); continue; }
+				let title=''; let titleOk=true; try { const meta=await v.json(); title=meta.title||''; titleOk=titleRelevant(title); } catch{}
+				if(titleOk){ debugLog.push({phase:'freetext-accept',url,title}); chrome.storage.local.set({suggestionDebug:debugLog}); return url; }
+				debugLog.push({phase:'freetext-title-mismatch',url,title});
+			} catch(e){ debugLog.push({phase:'freetext-error',url,error:e.message}); }
+		}
+		return null;
+	}
+
 	// 2. Fallback to legacy iterative text prompt approach
 	async function verify(url){
 		try {
@@ -298,6 +349,7 @@ chrome.runtime.onMessage.addListener((req,_s,sendResponse)=>{
 });
 
 chrome.tabs.onUpdated.addListener((tabId,info,tab)=>{ 
+			// Final resort: try extracting from concatenated debugging raw snippets (if any captured) -- not available here, so just fail
 	if(info.status==='complete'){
 		scheduleCheck();
 		// Second pass after 2.5s for SPA hydration or late content
