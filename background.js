@@ -298,8 +298,19 @@ chrome.alarms.onAlarm.addListener(async alarm=>{
 			}
 		}
 		const [currentTab]=await chrome.tabs.query({active:true,currentWindow:true});
-		await chrome.tabs.create({url:openUrl});
-		if(currentTab) chrome.tabs.remove(currentTab.id).catch(()=>{});
+		let createdTab=null;
+		try {
+			createdTab = await chrome.tabs.create({url:openUrl, active:true});
+		} catch(e){ console.warn('[SageMode] failed to create tab directly, retrying:', e.message); createdTab=null; }
+		// Fallback retry once if creation failed
+		if(!createdTab){
+			await new Promise(r=>setTimeout(r,400));
+			try { createdTab = await chrome.tabs.create({url:openUrl, active:true}); } catch{}
+		}
+		if(currentTab && createdTab && currentTab.id!==createdTab.id){
+			// Give Chrome a short moment to activate the new tab before closing the old one
+			setTimeout(()=>{ chrome.tabs.remove(currentTab.id).catch(()=>{}); },300);
+		}
 		chrome.storage.local.remove('nextVideoUrl');
 		chrome.storage.sync.remove('timerEndTime');
 		chrome.runtime.sendMessage({action:'suggestionOpened',url:openUrl});
