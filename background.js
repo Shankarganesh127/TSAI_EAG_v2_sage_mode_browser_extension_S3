@@ -28,7 +28,7 @@ function requireKey() { if (!API_KEY) throw new Error('Missing API key'); }
 async function gem(prompt){ requireKey(); return await GoogleGenerativeAI.generateContent(API_KEY, prompt); }
 
 function scheduleCheck(){
-  if(!isExtensionEnabled || !selectedTopic) return;
+  if(!isExtensionEnabled) return;
   if(pendingCheck) clearTimeout(pendingCheck);
   pendingCheck = setTimeout(()=>{ pendingCheck=null; checkActiveTab(); },350);
 }
@@ -147,7 +147,22 @@ chrome.runtime.onMessage.addListener((req, _sender, sendResponse)=>{
     return true;
   }
   if(req.action==='setExtensionState'){
-    isExtensionEnabled = req.enabled; selectedTopic = req.topic||''; originalTimer = req.timer||0; chrome.alarms.clear('contentCheck'); sendResponse({ success:true }); return true; }
+    isExtensionEnabled = req.enabled; selectedTopic = req.topic||''; originalTimer = req.timer||0; chrome.alarms.clear('contentCheck');
+    if(isExtensionEnabled){
+      // Attempt connection test if key present and not already validated
+      if(API_KEY && !modelConfigured){
+        GoogleGenerativeAI.generateContent(API_KEY,'ping').then(()=>{ modelConfigured=true; }).catch(()=>{ modelConfigured=false; chrome.action.setBadgeText({ text:'KEY'}); chrome.action.setBadgeBackgroundColor({ color:'#e67e22'}); });
+      } else if(!API_KEY){
+        chrome.action.setBadgeText({ text:'KEY'}); chrome.action.setBadgeBackgroundColor({ color:'#e67e22'});
+      }
+      // Schedule immediate content check (will no-op if topic missing)
+      scheduleCheck();
+    } else {
+      chrome.action.setBadgeText({ text:'' });
+    }
+    sendResponse({ success:true }); return true; }
+  if(req.action==='checkContent'){
+    scheduleCheck(); sendResponse({ success:true }); return true; }
 });
 
 // Events

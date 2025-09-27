@@ -172,6 +172,9 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
     updateExtensionState(enabledCheckbox.checked, topicInput.value.trim(), parseInt(timerInput.value));
+    if(enabledCheckbox.checked){
+      chrome.runtime.sendMessage({ action:'checkContent' });
+    }
   });
 
   // Initial load
