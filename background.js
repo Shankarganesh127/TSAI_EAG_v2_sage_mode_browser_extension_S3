@@ -221,4 +221,14 @@ chrome.runtime.onInstalled.addListener(()=>{
   });
 });
 
+// Periodic timer broadcast so popup opened mid-cycle can show without waiting for local poll
+setInterval(async () => {
+  try {
+    const { timerEndTime } = await chrome.storage.sync.get('timerEndTime');
+    if(timerEndTime){
+      chrome.runtime.sendMessage({ action:'timerUpdate', timerEndTime });
+    }
+  } catch { /* ignore */ }
+}, 15000); // every 15s
+
 export {}; // MV3 module terminator
