@@ -169,17 +169,15 @@ REASON: [brief explanation]`;
   }
 }
 
-// Listen for new tab creation
-chrome.tabs.onCreated.addListener(async (tab) => {
+// Listen for new tab creation and updates
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!isExtensionEnabled || !selectedTopic) return;
   
-  // Wait for the tab to complete loading
-  chrome.tabs.onUpdated.addListener(function listener(tabId, info) {
-    if (tabId === tab.id && info.status === 'complete') {
-      chrome.tabs.onUpdated.removeListener(listener);
-      checkNewTabContent(tab.id);
-    }
-  });
+  // Only check when the tab has finished loading
+  if (changeInfo.status === 'complete') {
+    console.log('📄 New tab loaded:', tabId);
+    checkNewTabContent(tabId);
+  }
 });
 
 // Handle extension enable/disable
@@ -189,7 +187,49 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     selectedTopic = request.topic || '';
     originalTimer = request.timer || 0;
     console.log(`Extension ${isExtensionEnabled ? 'enabled' : 'disabled'} for topic: ${selectedTopic}`);
+    
+    // Clear any existing timer when extension state changes
+    chrome.alarms.clear('contentCheck');
+    
     sendResponse({ success: true });
+  }
+});
+
+// Handle timer expiration
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === 'contentCheck') {
+    try {
+      // Get the stored tab ID
+      const { timerTabId } = await chrome.storage.local.get('timerTabId');
+      if (!timerTabId) {
+        console.log('❌ No tab ID stored for timer');
+        return;
+      }
+
+      console.log('⏰ Timer expired for tab:', timerTabId);
+      
+      // Get a new video suggestion
+      const videoUrl = await getYouTubeVideoSuggestion(selectedTopic);
+      if (videoUrl) {
+        console.log('✅ Got valid video URL:', videoUrl);
+        
+        // Create new tab with suggested video
+        const newTab = await chrome.tabs.create({ url: videoUrl });
+        console.log('✅ Created new tab:', newTab.id);
+        
+        // Close the non-relevant tab after a short delay
+        setTimeout(async () => {
+          try {
+            await chrome.tabs.remove(timerTabId);
+            console.log('✅ Closed non-relevant tab:', timerTabId);
+          } catch (removeError) {
+            console.error('❌ Error closing tab:', removeError);
+          }
+        }, 500);
+      }
+    } catch (error) {
+      console.error('❌ Error handling timer expiration:', error);
+    }
   }
 });
 
@@ -213,37 +253,26 @@ async function checkNewTabContent(tabId) {
       color: isRelevant ? 'green' : 'red'
     });
 
-    // If content is not relevant, get and open a new video
-    if (!isRelevant) {
-      try {
-        console.log('🎥 Getting video suggestion for topic:', selectedTopic);
-        const videoUrl = await getYouTubeVideoSuggestion(selectedTopic);
+    // Clear any existing timer
+    await chrome.alarms.clear('contentCheck');
+
+    if (isRelevant) {
+      console.log('✅ Content is relevant - No timer needed');
+      // Remove any stored tab ID since content is relevant
+      await chrome.storage.local.remove('timerTabId');
+    } else {
+      if (originalTimer > 0) {
+        // Store the current tab id for the alarm handler
+        await chrome.storage.local.set({ 'timerTabId': tab.id });
         
-        if (videoUrl) {
-          console.log('✅ Got valid video URL:', videoUrl);
-          
-          // Create new tab with suggested video
-          const newTab = await chrome.tabs.create({ url: videoUrl });
-          console.log('✅ Created new tab:', newTab.id);
-          
-          // Close the current non-relevant tab after a short delay
-          setTimeout(async () => {
-            try {
-              await chrome.tabs.remove(tab.id);
-              console.log('✅ Closed old tab:', tab.id);
-            } catch (removeError) {
-              console.error('❌ Error closing old tab:', removeError);
-            }
-          }, 500);
-          
-          // Reset timer
-          if (originalTimer > 0) {
-            chrome.alarms.create('contentCheck', { delayInMinutes: originalTimer });
-            console.log('⏰ Reset timer to:', originalTimer, 'minutes');
-          }
-        } else {
-          console.error('❌ No valid video URL returned');
-        }
+        // Start timer for non-relevant content
+        await chrome.alarms.create('contentCheck', { delayInMinutes: originalTimer });
+        console.log('⏰ Started timer for non-relevant content:', originalTimer, 'minutes');
+      }
+    }
+  } catch (error) {
+    console.error('❌ Error checking new tab content:', error);
+  }
       } catch (videoError) {
         console.error('❌ Error in video suggestion process:', videoError);
       }
