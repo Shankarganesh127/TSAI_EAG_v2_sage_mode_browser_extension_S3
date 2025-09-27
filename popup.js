@@ -68,11 +68,24 @@ document.addEventListener('DOMContentLoaded', () => {
       
       if (response && response.success) {
         statusDot.className = 'status-dot connected';
-        statusText.textContent = 'Connected to Gemini';
+        const modelStr = response.model ? ` (${response.model})` : '';
+        const latency = typeof response.ms === 'number' ? ` ${response.ms}ms` : '';
+        statusText.textContent = 'Connected' + modelStr + latency;
         statusText.style.color = '#2ecc71';
       } else {
         statusDot.className = 'status-dot error';
-        statusText.textContent = response?.error || 'Connection Error';
+        let base = response?.error || 'Connection Error';
+        if (response?.diagnostics) {
+          const d = response.diagnostics;
+            const parts = [];
+            if (d.status) parts.push('HTTP '+d.status);
+            if (d.model) parts.push(d.model);
+            if (d.ms) parts.push(d.ms+'ms');
+            if (/invalid api key|permission/i.test(base)) parts.push('Check key / model access');
+            statusText.textContent = base + (parts.length? ' ['+parts.join(' | ')+']':'');
+        } else {
+          statusText.textContent = base;
+        }
         statusText.style.color = '#e74c3c';
       }
     });

@@ -106,7 +106,21 @@ chrome.runtime.onMessage.addListener((req,_s,sendResponse)=>{
 		if(!API_KEY){ sendResponse({success:false,error:'Missing API key'}); return true; }
 		if(isCheckingConnection){ sendResponse({success:modelConfigured,error:'Check in progress'}); return true; }
 		isCheckingConnection=true;
-		GoogleGenerativeAI.generateContent(API_KEY,'ping').then(()=>{ modelConfigured=true; sendResponse({success:true}); }).catch(err=>{ modelConfigured=false; sendResponse({success:false,error:err.message}); }).finally(()=>{ isCheckingConnection=false; });
+		const started=Date.now();
+		GoogleGenerativeAI.generateContent(API_KEY,'ping').then(()=>{
+			modelConfigured=true;
+			sendResponse({success:true,model:GoogleGenerativeAI.getCurrentModel(),ms:Date.now()-started});
+		}).catch(err=>{
+			modelConfigured=false;
+			const diag={
+				message:err.message,
+				status:err.status,
+				model:GoogleGenerativeAI.getCurrentModel(),
+				ms:Date.now()-started,
+				rawSnippet: err.raw? JSON.stringify(err.raw).slice(0,180):undefined
+			};
+			sendResponse({success:false,error:diag.message,diagnostics:diag});
+		}).finally(()=>{ isCheckingConnection=false; });
 		return true;
 	}
 	if(req.action==='setExtensionState'){

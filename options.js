@@ -24,7 +24,22 @@ document.addEventListener('DOMContentLoaded', () => {
     chrome.storage.sync.set({ apiKey: key }, () => {
       setStatus('Key saved. You can test the connection.', 'ok');
       chrome.runtime.sendMessage({ action:'checkGeminiConnection' }, resp => {
-        if(resp?.success) setStatus('Connection successful.', 'ok'); else setStatus('Saved. Test failed: ' + (resp?.error||'Unknown error'), 'err');
+        if(resp?.success) {
+          const modelInfo = resp.model ? ` Model: ${resp.model}` : '';
+          const latency = typeof resp.ms==='number'? ` (${resp.ms}ms)`:'';
+          setStatus('Connection successful.'+modelInfo+latency, 'ok');
+        } else {
+          let msg = 'Saved. Test failed: ' + (resp?.error||'Unknown error');
+          if(resp?.diagnostics){
+            const d=resp.diagnostics; const parts=[];
+            if(d.status) parts.push('HTTP '+d.status);
+            if(d.model) parts.push(d.model);
+            if(d.ms) parts.push(d.ms+'ms');
+            if(/invalid|permission|unauthorized/i.test(d.message)) parts.push('Check API key / model access');
+            if(parts.length) msg += ' ['+parts.join(' | ')+']';
+          }
+          setStatus(msg,'err');
+        }
       });
     });
   });
@@ -33,7 +48,15 @@ document.addEventListener('DOMContentLoaded', () => {
     setStatus('Testing...', '');
     chrome.runtime.sendMessage({ action:'checkGeminiConnection' }, resp => {
       if(chrome.runtime.lastError) { setStatus('Runtime error: '+chrome.runtime.lastError.message,'err'); return; }
-      if(resp?.success) setStatus('Connection OK.', 'ok'); else setStatus((resp?.error||'Failed'),'err');
+      if(resp?.success){
+        const modelInfo = resp.model ? ` Model: ${resp.model}` : '';
+        const latency = typeof resp.ms==='number'? ` (${resp.ms}ms)`:'';
+        setStatus('Connection OK.'+modelInfo+latency,'ok');
+      } else {
+        let msg = resp?.error||'Failed';
+        if(resp?.diagnostics){ const d=resp.diagnostics; const parts=[]; if(d.status) parts.push('HTTP '+d.status); if(d.model) parts.push(d.model); if(d.ms) parts.push(d.ms+'ms'); if(/invalid|permission|unauthorized/i.test(d.message)) parts.push('Check API key / model access'); if(parts.length) msg += ' ['+parts.join(' | ')+']'; }
+        setStatus(msg,'err');
+      }
     });
   });
 
