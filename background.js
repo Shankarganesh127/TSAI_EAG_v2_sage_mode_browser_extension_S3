@@ -80,6 +80,32 @@ async function suggestVideo(topic){
 	// Soft-fail statuses: treat as inconclusive (video may still load even if oEmbed blocked)
 	const SOFT_FAIL_STATUSES = new Set([401,403,404,429]);
 	const debugLog = [];
+
+	// 1. Try structured JSON approach first for deterministic parsing
+	try {
+		const jsonPrompt = `Return a STRICT single-line JSON object ONLY (no backticks) with keys: video_url, channel, confidence.
+Constraints:
+ - topic: ${topic}
+ - channel must contain one of: ${trusted.join(', ')} (case-insensitive substring)
+ - video_url canonical form: https://www.youtube.com/watch?v=VIDEOID (11 chars)
+ - no playlists, shorts, live, youtu.be, or additional params.
+ - confidence: 0-1 number (estimate relevance to topic)
+Example: {"video_url":"https://www.youtube.com/watch?v=abcdefghijk","channel":"freeCodeCamp","confidence":0.92}`;
+		const rawJson = await GoogleGenerativeAI.generateJson(API_KEY, jsonPrompt).catch(e=>{ throw e; });
+		debugLog.push({phase:'json-attempt',rawSnippet:rawJson.slice(0,160)});
+		try {
+			const parsed = JSON.parse(rawJson.trim());
+			const url = parsed.video_url || parsed.url;
+			const channel = (parsed.channel||'').toLowerCase();
+			if(url && /https:\/\/www\.youtube\.com\/watch\?v=[A-Za-z0-9_-]{11}$/.test(url) && trusted.some(p=>channel.includes(p))){
+				// Quick verify
+				try { const v=await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(url)}`); if(v.ok || SOFT_FAIL_STATUSES.has(v.status)){ debugLog.push({phase:'json-verify',status:v.status}); chrome.storage.local.set({suggestionDebug:debugLog}); return url; } } catch(e){ debugLog.push({phase:'json-verify-error',error:e.message}); chrome.storage.local.set({suggestionDebug:debugLog}); return url; }
+			}
+			debugLog.push({phase:'json-parse-reject',reason:'Validation failed'});
+		} catch(e){ debugLog.push({phase:'json-parse-error',error:e.message}); }
+	} catch(e){ debugLog.push({phase:'json-attempt-failed',error:e.message}); }
+
+	// 2. Fallback to legacy iterative text prompt approach
 	async function verify(url){
 		try {
 			const r=await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(url)}`);
