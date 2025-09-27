@@ -171,18 +171,26 @@ chrome.runtime.onMessage.addListener((req, _sender, sendResponse)=>{
     return true;
   }
   if(req.action==='setExtensionState'){
+    const prevEnabled = isExtensionEnabled;
+    const prevTopic = selectedTopic;
+    const prevTimer = originalTimer;
     isExtensionEnabled = req.enabled; selectedTopic = req.topic||''; originalTimer = req.timer||0; chrome.alarms.clear('contentCheck');
     if(isExtensionEnabled){
-      // Attempt connection test if key present and not already validated
+      // Only reset suggestion timer if newly enabled or core parameters changed
+      if(!prevEnabled || prevTopic!==selectedTopic || prevTimer!==originalTimer){
+        chrome.alarms.clear('youtubeSuggestion');
+        chrome.storage.sync.set({ timerEndTime: null });
+      }
       if(API_KEY && !modelConfigured){
         GoogleGenerativeAI.generateContent(API_KEY,'ping').then(()=>{ modelConfigured=true; }).catch(()=>{ modelConfigured=false; chrome.action.setBadgeText({ text:'KEY'}); chrome.action.setBadgeBackgroundColor({ color:'#e67e22'}); });
       } else if(!API_KEY){
         chrome.action.setBadgeText({ text:'KEY'}); chrome.action.setBadgeBackgroundColor({ color:'#e67e22'});
       }
-      // Schedule immediate content check (will no-op if topic missing)
       scheduleCheck();
     } else {
       chrome.action.setBadgeText({ text:'' });
+      chrome.alarms.clear('youtubeSuggestion');
+      chrome.storage.sync.set({ timerEndTime: null });
     }
     sendResponse({ success:true }); return true; }
   if(req.action==='checkContent'){

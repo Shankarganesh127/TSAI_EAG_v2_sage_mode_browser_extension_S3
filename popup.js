@@ -83,17 +83,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function updateTimerDisplay() {
     chrome.storage.sync.get(['timerEndTime'], (result) => {
-      if (result.timerEndTime && result.timerEndTime > Date.now()) {
-        const remaining = Math.round((result.timerEndTime - Date.now()) / 1000);
-        const minutes = Math.floor(remaining / 60);
-        const seconds = remaining % 60;
-        timerDisplay.textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-      } else {
-        timerDisplay.textContent = '00:00';
-        if (timerInterval) {
-          clearInterval(timerInterval);
+      const end = result.timerEndTime;
+      if (end && typeof end === 'number') {
+        const diffMs = end - Date.now();
+        if (diffMs > 0) {
+          const remaining = Math.floor(diffMs / 1000);
+          const minutes = Math.floor(remaining / 60);
+          const seconds = remaining % 60;
+          timerDisplay.textContent = `${minutes.toString().padStart(2,'0')}:${seconds.toString().padStart(2,'0')}`;
+          return;
         }
       }
+      timerDisplay.textContent = '00:00';
+      if (timerInterval) clearInterval(timerInterval);
     });
   }
 
