@@ -16,6 +16,41 @@ const comparisonCache = new Map();
 const classificationCache = new Map();
 const rejectedVideoIds = new Set(); // persistent in-session to avoid repeating bad/unavailable videos
 
+// --- Heuristic relevance utilities (title/content keyword coverage) -----------------
+const HEURISTIC_STOP_WORDS = new Set(['the','a','an','and','for','with','of','to','on','in','by','from','about','how','learn','guide','tutorial','course','introduction','intro','this','that','into','using','use']);
+function tokenizeContent(str){
+	return (str||'')
+		.toLowerCase()
+		.replace(/[^a-z0-9+.# ]+/g,' ')
+		.split(/\s+/)
+		.filter(w=>w.length>2 && !HEURISTIC_STOP_WORDS.has(w));
+}
+function heuristicRelevance(userTopic, data){
+	if(!userTopic || !data) return {decided:false};
+	const topicTokens = tokenizeContent(userTopic);
+	if(!topicTokens.length) return {decided:false};
+	// Aggregate page textual surface: title + description + top headers
+	const headerSlice = [
+		...(data.headers?.h1||[]).slice(0,3),
+		...(data.headers?.h2||[]).slice(0,3)
+	].join(' ');
+	const surface = `${data.title||''} ${data.description||''} ${headerSlice}`;
+	const surfaceTokens = new Set(tokenizeContent(surface));
+	if(!surfaceTokens.size) return {decided:false};
+	let covered=0; for(const t of topicTokens){ if(surfaceTokens.has(t)) covered++; }
+	const coverage = covered / topicTokens.length;
+	// Strong accept if all tokens present
+	if(coverage === 1){
+		return {decided:true,isRelevant:true,confidence:0.95,reason:'Title/content contain all topic keywords'};
+	}
+	// Accept if majority of tokens (>=70%) present
+	if(coverage >= 0.7){
+		return {decided:true,isRelevant:true,confidence:0.85 + 0.1*(coverage-0.7)/0.3,reason:`High keyword coverage ${(coverage*100).toFixed(0)}%`};
+	}
+	// Early skip if almost none (<15%) to save an API call? We choose NOT to early reject to avoid false negatives.
+	return {decided:false};
+}
+
 function startTimerTick(){
 	if(timerTickInterval) return;
 	timerTickInterval=setInterval(async()=>{
@@ -193,9 +228,17 @@ async function checkActiveTab(){
 		lastCheckedUrl = tab.url;
 		if(!topic){ chrome.action.setBadgeText({text:''}); chrome.storage.local.set({currentState:{currentContent:data.title.slice(0,120),pageUrl:data.url,timestamp:new Date().toISOString(),tabId:tab.id}}); return; }
 		const urlKey=data.url.split('#')[0]; const cls=await classify(urlKey,data); const {isRelevant,confidence,reason}=await compare(cls.category,cls.topic,topic);
-		chrome.tabs.sendMessage(tab.id,{action:'updateHighlight',color:isRelevant?'#2ecc71':'#e74c3c',reason:reason||(isRelevant?'Relevant':'Not relevant')});
-		chrome.storage.local.set({ currentState:{ currentContent:data.title.slice(0,120), contentTopic:`${cls.category} - ${cls.topic}\n(${cls.audience})`, selectedTopic:topic, isRelevant, confidence, reason, timestamp:new Date().toISOString(), tabId:tab.id } });
-		if(isRelevant && confidence>=0.6){
+		// Heuristic short-circuit AFTER classification but BEFORE acting on model result: if heuristics strongly relevant, override
+		let finalRelevant=isRelevant, finalConfidence=confidence, finalReason=reason;
+		const heuristic=heuristicRelevance(topic,data);
+		if(heuristic.decided){
+			finalRelevant=heuristic.isRelevant;
+			finalConfidence=heuristic.confidence;
+			finalReason=heuristic.reason + ' (heuristic)';
+		}
+		chrome.tabs.sendMessage(tab.id,{action:'updateHighlight',color:finalRelevant?'#2ecc71':'#e74c3c',reason:finalReason||(finalRelevant?'Relevant':'Not relevant')});
+		chrome.storage.local.set({ currentState:{ currentContent:data.title.slice(0,120), contentTopic:`${cls.category} - ${cls.topic}\n(${cls.audience})`, selectedTopic:topic, isRelevant:finalRelevant, confidence:finalConfidence, reason:finalReason, timestamp:new Date().toISOString(), tabId:tab.id } });
+		if(finalRelevant && finalConfidence>=0.6){
 			chrome.action.setBadgeText({text:'✓'});
 			chrome.action.setBadgeBackgroundColor({color:'#2ecc71'});
 			chrome.alarms.clear('youtubeSuggestion');
@@ -215,7 +258,7 @@ async function checkActiveTab(){
 				startTimerTick();
 			}
 		}
-		chrome.runtime.sendMessage({action:'contentStateUpdate',state:{isRelevant,confidence,reason,pageTitle:data.title,pageUrl:data.url}});
+		chrome.runtime.sendMessage({action:'contentStateUpdate',state:{isRelevant:finalRelevant,confidence:finalConfidence,reason:finalReason,pageTitle:data.title,pageUrl:data.url}});
 	} catch(e){ console.error('Check failed',e); chrome.action.setBadgeText({text:'x'}); chrome.action.setBadgeBackgroundColor({color:'#e74c3c'}); }
 }
 
