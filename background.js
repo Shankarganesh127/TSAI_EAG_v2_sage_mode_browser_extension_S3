@@ -29,6 +29,8 @@ function tokenizeContent(str){
 }
 function heuristicRelevance(userTopic, data){
 	if(!userTopic || !data) return {decided:false};
+	// Disable heuristic short-circuit on YouTube watch pages to avoid false positives caused by large recommendation text surface
+	try { if(/https?:\/\/([a-zA-Z0-9-]+\.)?youtube\.com\/watch/.test(data.url)) return {decided:false}; } catch{}
 	const topicTokens = tokenizeContent(userTopic);
 	if(!topicTokens.length) return {decided:false};
 	// Aggregate page textual surface: title + description + top headers
@@ -348,6 +350,30 @@ chrome.tabs.onActivated.addListener(()=> scheduleCheck());
 
 if(spaUrlPollInterval) clearInterval(spaUrlPollInterval);
 spaUrlPollInterval=setInterval(async()=>{ const {enabled,isMonitoring}=await chrome.storage.sync.get(['enabled','isMonitoring']); if(!enabled||!isMonitoring) return; const [tab]=await chrome.tabs.query({active:true,currentWindow:true}); if(!tab) return; if(tab.url!==lastCheckedUrl){ scheduleCheck(); } },5000);
+// Faster poll to catch in-tab video/video navigation changes (esp. YouTube dynamic loads)
+if(spaUrlPollInterval) clearInterval(spaUrlPollInterval);
+spaUrlPollInterval=setInterval(async()=>{
+	try {
+		const {enabled,isMonitoring}=await chrome.storage.sync.get(['enabled','isMonitoring']);
+		if(!enabled||!isMonitoring) return;
+		const [tab]=await chrome.tabs.query({active:true,currentWindow:true});
+		if(!tab) return;
+		if(tab.url!==lastCheckedUrl){
+			// Clear classification cache for prior URL to force fresh classification
+			try { if(lastCheckedUrl){ const basePrev=lastCheckedUrl.split('#')[0]; classificationCache.delete(basePrev); } } catch{}
+			lastCheckedUrl = tab.url;
+			scheduleCheck();
+		}
+		// On YouTube watch pages, force periodic re-check even if URL same (video might change via JS)
+		if(/https?:\/\/([a-zA-Z0-9-]+\.)?youtube\.com\/watch/.test(tab.url)){
+			// randomize slight jitter to avoid synchronous firing
+			if(Math.random()<0.15){
+				try { const base=tab.url.split('#')[0]; classificationCache.delete(base); comparisonCache.clear(); } catch{}
+				scheduleCheck();
+			}
+		}
+	}catch{}
+},2500);
 chrome.alarms.onAlarm.addListener(async alarm=>{
 	if(alarm.name!=='youtubeSuggestion') return;
 	try {
