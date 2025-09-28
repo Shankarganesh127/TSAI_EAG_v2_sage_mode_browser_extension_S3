@@ -305,8 +305,24 @@ chrome.runtime.onMessage.addListener((req,_s,sendResponse)=>{
 		// Dynamic page mutation or in-tab navigation (SPA) reported by content script
 		// Throttle: rely on existing scheduleCheck debounce plus a short guard to avoid flooding
 		if(isExtensionEnabled){
-			// Re-schedule with slight delay to allow layout stabilization
-			scheduleCheck();
+			// Invalidate cached classification for current active tab (same URL but changed content)
+			try {
+				chrome.tabs.query({active:true,currentWindow:true}).then(tabs=>{
+					const tab=tabs[0];
+					if(tab && tab.url){
+						try {
+							const baseUrl = tab.url.split('#')[0];
+							if(classificationCache.has(baseUrl)){
+								classificationCache.delete(baseUrl);
+								comparisonCache.clear();
+								console.debug('[SageMode] Cleared classification & comparison cache due to content change');
+							}
+						} catch(e){ /* silent */ }
+					}
+					// Re-schedule with slight delay to allow layout stabilization
+					scheduleCheck();
+				});
+			} catch(e){ /* ignore */ }
 		}
 		if(sendResponse) sendResponse({received:true});
 		return true;
