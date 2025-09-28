@@ -12,6 +12,7 @@ let lastCheckedUrl = null; // For SPA change detection
 let spaUrlPollInterval = null;
 let timerTickInterval = null;
 let monitorInterval = null; // 5-second re-check loop
+let lastOffTopicTabId = null; // Track most recent off-topic tab to close when a relevant tab appears
 // Caches (single instances)
 const comparisonCache = new Map();
 const classificationCache = new Map();
@@ -248,6 +249,11 @@ async function checkActiveTab(){
 			chrome.alarms.clear('youtubeSuggestion');
 			chrome.storage.sync.set({timerEndTime:null,timerStartedAt:null,timerDurationMs:null});
 			chrome.storage.local.remove('nextVideoUrl');
+			// If we had an earlier off-topic tab different from this one, attempt to close it now
+			if(lastOffTopicTabId && lastOffTopicTabId!==tab.id){
+				try { chrome.tabs.remove(lastOffTopicTabId); } catch(_){}
+			}
+			lastOffTopicTabId = null;
 		}else{
 			chrome.action.setBadgeText({text:'!'});
 			chrome.action.setBadgeBackgroundColor({color:'#e74c3c'});
@@ -261,6 +267,7 @@ async function checkActiveTab(){
 				await chrome.storage.sync.set({timerEndTime:endTime,timerStartedAt:Date.now(),timerDurationMs:timer*60000});
 				startTimerTick();
 			}
+			lastOffTopicTabId = tab.id; // remember this off-topic tab so we can close it later when a relevant tab appears
 		}
 		chrome.runtime.sendMessage({action:'contentStateUpdate',state:{isRelevant:finalRelevant,confidence:finalConfidence,reason:finalReason,pageTitle:data.title,pageUrl:data.url}});
 	} catch(e){ console.error('Check failed',e); chrome.action.setBadgeText({text:'x'}); chrome.action.setBadgeBackgroundColor({color:'#e74c3c'}); }
@@ -410,6 +417,10 @@ chrome.alarms.onAlarm.addListener(async alarm=>{
 		if(currentTab && createdTab && currentTab.id!==createdTab.id){
 			// Give Chrome a short moment to activate the new tab before closing the old one
 			setTimeout(()=>{ chrome.tabs.remove(currentTab.id).catch(()=>{}); },300);
+		}
+		// Schedule a relevance check on the newly opened suggested video tab so loop continues
+		if(createdTab){
+			setTimeout(()=>{ try { scheduleCheck(); } catch{} }, 1200); // allow page load start
 		}
 		chrome.storage.local.remove('nextVideoUrl');
 		chrome.storage.sync.remove('timerEndTime');
