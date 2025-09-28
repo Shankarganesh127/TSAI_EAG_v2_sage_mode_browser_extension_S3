@@ -301,6 +301,16 @@ chrome.runtime.onMessage.addListener((req,_s,sendResponse)=>{
 		sendResponse({success:true}); return true;
 	}
 	if(req.action==='checkContent'){ scheduleCheck(); sendResponse({success:true}); return true; }
+	if(req.action==='pageSoftChange'){
+		// Dynamic page mutation or in-tab navigation (SPA) reported by content script
+		// Throttle: rely on existing scheduleCheck debounce plus a short guard to avoid flooding
+		if(isExtensionEnabled){
+			// Re-schedule with slight delay to allow layout stabilization
+			scheduleCheck();
+		}
+		if(sendResponse) sendResponse({received:true});
+		return true;
+	}
 });
 
 chrome.tabs.onUpdated.addListener((tabId,info,tab)=>{ 

@@ -81,3 +81,74 @@ function updateHighlight(color = 'transparent', reason) {
 function escapeHtml(str) {
   return (str || '').replace(/[&<>"]/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[s]));
 }
+
+// ---------------- Dynamic Change / SPA Navigation Detection -----------------
+// Goal: Inform background script when meaningful content or in-tab navigation changes
+// so relevance can be re-evaluated promptly (instead of waiting only for polling).
+
+(function initDynamicChangeDetection(){
+  try {
+    let lastSignature = null;
+    let pendingTimer = null;
+    let lastDispatch = 0;
+    const MIN_INTERVAL = 2500; // minimum ms between background notifications
+
+    function computeSignature(){
+      try {
+        const data = extractStructuredContent();
+        // Use a light signature: title + first 400 chars of body + first 2 h1/h2
+        const h1 = (data.headers.h1||[]).slice(0,2).join('|');
+        const h2 = (data.headers.h2||[]).slice(0,2).join('|');
+        const bodySlice = (data.body||'').slice(0,400);
+        return [data.title, bodySlice, h1, h2].join('@@');
+      } catch { return null; }
+    }
+
+    function maybeNotify(force){
+      const now = Date.now();
+      if(!force && (now - lastDispatch) < MIN_INTERVAL) return; // throttle
+      const sig = computeSignature();
+      if(!sig) return;
+      if(!force && sig === lastSignature) return; // no change
+      lastSignature = sig;
+      lastDispatch = now;
+      chrome.runtime.sendMessage({action:'pageSoftChange', signature:sig});
+    }
+
+    function scheduleCheck(){
+      if(pendingTimer) clearTimeout(pendingTimer);
+      pendingTimer = setTimeout(()=>{ pendingTimer=null; maybeNotify(false); }, 800);
+    }
+
+    // Mutation observer on main content region / body
+    const target = document.querySelector('main, article, [role="main"], .content, #content') || document.body;
+    if(target && window.MutationObserver){
+      const obs = new MutationObserver(mutations=>{
+        // Ignore attribute-only changes that do not modify text content
+        if(!mutations.some(m=> m.type==='characterData' || m.type==='childList')) return;
+        scheduleCheck();
+      });
+      obs.observe(target,{subtree:true, childList:true, characterData:true});
+    }
+
+    // SPA navigation detection via History API patch
+    function hookHistoryMethod(name){
+      const orig = history[name];
+      if(typeof orig !== 'function') return;
+      history[name] = function(...args){
+        const ret = orig.apply(this,args);
+        // Give the DOM a brief chance to update
+        setTimeout(()=> maybeNotify(true), 150);
+        return ret;
+      };
+    }
+    hookHistoryMethod('pushState');
+    hookHistoryMethod('replaceState');
+    window.addEventListener('popstate', ()=> setTimeout(()=> maybeNotify(true), 120));
+
+    // Initial baseline signature
+    lastSignature = computeSignature();
+  } catch(e){
+    console.warn('[SageMode] dynamic change detection init failed:', e.message);
+  }
+})();
